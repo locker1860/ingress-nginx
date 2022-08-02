@@ -19,6 +19,7 @@ package template
 import (
 	"fmt"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -61,27 +62,30 @@ const (
 	globalAuthSnippet             = "global-auth-snippet"
 	globalAuthCacheKey            = "global-auth-cache-key"
 	globalAuthCacheDuration       = "global-auth-cache-duration"
+	globalAuthAlwaysSetCookie     = "global-auth-always-set-cookie"
 	luaSharedDictsKey             = "lua-shared-dicts"
 	plugins                       = "plugins"
+	debugConnections              = "debug-connections"
 )
 
 var (
 	validRedirectCodes    = sets.NewInt([]int{301, 302, 307, 308}...)
+	dictSizeRegex         = regexp.MustCompile(`^(\d+)([kKmM])?$`)
 	defaultLuaSharedDicts = map[string]int{
-		"configuration_data":            20,
-		"certificate_data":              20,
-		"balancer_ewma":                 10,
-		"balancer_ewma_last_touched_at": 10,
-		"balancer_ewma_locks":           1,
-		"certificate_servers":           5,
-		"ocsp_response_cache":           5, // keep this same as certificate_servers
-		"global_throttle_cache":         10,
+		"configuration_data":            20480,
+		"certificate_data":              20480,
+		"balancer_ewma":                 10240,
+		"balancer_ewma_last_touched_at": 10240,
+		"balancer_ewma_locks":           1024,
+		"certificate_servers":           5120,
+		"ocsp_response_cache":           5120, // keep this same as certificate_servers
+		"global_throttle_cache":         10240,
 	}
 	defaultGlobalAuthRedirectParam = "rd"
 )
 
 const (
-	maxAllowedLuaDictSize = 200
+	maxAllowedLuaDictSize = 204800
 	maxNumberOfLuaDicts   = 100
 )
 
@@ -108,6 +112,7 @@ func ReadConfig(src map[string]string) config.Configuration {
 	blockRefererList := make([]string, 0)
 	responseHeaders := make([]string, 0)
 	luaSharedDicts := make(map[string]int)
+	debugConnectionsList := make([]string, 0)
 
 	//parse lua shared dict values
 	if val, ok := conf[luaSharedDictsKey]; ok {
@@ -117,18 +122,18 @@ func ReadConfig(src map[string]string) config.Configuration {
 			v = strings.Replace(v, " ", "", -1)
 			results := strings.SplitN(v, ":", 2)
 			dictName := results[0]
-			size, err := strconv.Atoi(results[1])
-			if err != nil {
-				klog.Errorf("Ignoring non integer value %v for Lua dictionary %v: %v.", results[1], dictName, err)
+			size := dictStrToKb(results[1])
+			if size < 0 {
+				klog.Errorf("Ignoring poorly formatted value %v for Lua dictionary %v", results[1], dictName)
 				continue
 			}
 			if size > maxAllowedLuaDictSize {
-				klog.Errorf("Ignoring %v for Lua dictionary %v: maximum size is %v.", size, dictName, maxAllowedLuaDictSize)
+				klog.Errorf("Ignoring %v for Lua dictionary %v: maximum size is %vk.", results[1], dictName, maxAllowedLuaDictSize)
 				continue
 			}
 			if len(luaSharedDicts)+1 > maxNumberOfLuaDicts {
 				klog.Errorf("Ignoring %v for Lua dictionary %v: can not configure more than %v dictionaries.",
-					size, dictName, maxNumberOfLuaDicts)
+					results[1], dictName, maxNumberOfLuaDicts)
 				continue
 			}
 
@@ -313,6 +318,16 @@ func ReadConfig(src map[string]string) config.Configuration {
 		to.GlobalExternalAuth.AuthCacheDuration = cacheDurations
 	}
 
+	if val, ok := conf[globalAuthAlwaysSetCookie]; ok {
+		delete(conf, globalAuthAlwaysSetCookie)
+
+		alwaysSetCookie, err := strconv.ParseBool(val)
+		if err != nil {
+			klog.Warningf("Global auth location denied - %s", fmt.Errorf("cannot convert %s to bool: %v", globalAuthAlwaysSetCookie, err))
+		}
+		to.GlobalExternalAuth.AlwaysSetCookie = alwaysSetCookie
+	}
+
 	// Verify that the configured timeout is parsable as a duration. if not, set the default value
 	if val, ok := conf[proxyHeaderTimeout]; ok {
 		delete(conf, proxyHeaderTimeout)
@@ -358,6 +373,24 @@ func ReadConfig(src map[string]string) config.Configuration {
 	if val, ok := conf[plugins]; ok {
 		to.Plugins = splitAndTrimSpace(val, ",")
 		delete(conf, plugins)
+	}
+
+	if val, ok := conf[debugConnections]; ok {
+		delete(conf, debugConnections)
+		for _, i := range splitAndTrimSpace(val, ",") {
+			validIp := net.ParseIP(i)
+			if validIp != nil {
+				debugConnectionsList = append(debugConnectionsList, i)
+			} else {
+				_, _, err := net.ParseCIDR(i)
+				if err == nil {
+					debugConnectionsList = append(debugConnectionsList, i)
+				} else {
+					klog.Warningf("%v is not a valid IP or CIDR address", i)
+				}
+			}
+		}
+		to.DebugConnections = debugConnectionsList
 	}
 
 	to.CustomHTTPErrors = filterErrors(errors)
@@ -426,4 +459,23 @@ func splitAndTrimSpace(s, sep string) []string {
 	}
 
 	return values
+}
+
+func dictStrToKb(sizeStr string) int {
+	sizeMatch := dictSizeRegex.FindStringSubmatch(sizeStr)
+	if sizeMatch == nil {
+		return -1
+	}
+	size, _ := strconv.Atoi(sizeMatch[1]) // validated already with regex
+	if sizeMatch[2] == "" || strings.ToLower(sizeMatch[2]) == "m" {
+		size *= 1024
+	}
+	return size
+}
+
+func dictKbToStr(size int) string {
+	if size%1024 == 0 {
+		return fmt.Sprintf("%dM", size/1024)
+	}
+	return fmt.Sprintf("%dK", size)
 }

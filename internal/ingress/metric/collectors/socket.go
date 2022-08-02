@@ -19,7 +19,6 @@ package collectors
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"os"
 	"syscall"
@@ -32,6 +31,7 @@ import (
 
 type upstream struct {
 	Latency        float64 `json:"upstreamLatency"`
+	HeaderTime     float64 `json:"upstreamHeaderTime"`
 	ResponseLength float64 `json:"upstreamResponseLength"`
 	ResponseTime   float64 `json:"upstreamResponseTime"`
 	//Status         string  `json:"upstreamStatus"`
@@ -53,7 +53,15 @@ type socketData struct {
 	Namespace string `json:"namespace"`
 	Ingress   string `json:"ingress"`
 	Service   string `json:"service"`
+	Canary    string `json:"canary"`
 	Path      string `json:"path"`
+}
+
+// HistogramBuckets allow customizing prometheus histogram buckets values
+type HistogramBuckets struct {
+	TimeBuckets   []float64
+	LengthBuckets []float64
+	SizeBuckets   []float64
 }
 
 // SocketCollector stores prometheus metrics and ingress meta-data
@@ -66,7 +74,8 @@ type SocketCollector struct {
 	responseTime   *prometheus.HistogramVec
 	responseLength *prometheus.HistogramVec
 
-	upstreamLatency *prometheus.SummaryVec
+	upstreamHeaderTime *prometheus.SummaryVec
+	upstreamLatency    *prometheus.SummaryVec
 
 	bytesSent *prometheus.HistogramVec
 
@@ -78,7 +87,10 @@ type SocketCollector struct {
 
 	hosts sets.String
 
-	metricsPerHost bool
+	metricsPerHost      bool
+	reportStatusClasses bool
+
+	buckets HistogramBuckets
 }
 
 var (
@@ -91,6 +103,7 @@ var (
 		"namespace",
 		"ingress",
 		"service",
+		"canary",
 	}
 )
 
@@ -100,8 +113,8 @@ var defObjectives = map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001}
 
 // NewSocketCollector creates a new SocketCollector instance using
 // the ingress watch namespace and class used by the controller
-func NewSocketCollector(pod, namespace, class string, metricsPerHost bool) (*SocketCollector, error) {
-	socket := "/tmp/prometheus-nginx.socket"
+func NewSocketCollector(pod, namespace, class string, metricsPerHost, reportStatusClasses bool, buckets HistogramBuckets) (*SocketCollector, error) {
+	socket := "/tmp/nginx/prometheus-nginx.socket"
 	// unix sockets must be unlink()ed before being used
 	_ = syscall.Unlink(socket)
 
@@ -129,7 +142,8 @@ func NewSocketCollector(pod, namespace, class string, metricsPerHost bool) (*Soc
 	sc := &SocketCollector{
 		listener: listener,
 
-		metricsPerHost: metricsPerHost,
+		metricsPerHost:      metricsPerHost,
+		reportStatusClasses: reportStatusClasses,
 
 		responseTime: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -137,6 +151,7 @@ func NewSocketCollector(pod, namespace, class string, metricsPerHost bool) (*Soc
 				Help:        "The time spent on receiving the response from the upstream server",
 				Namespace:   PrometheusNamespace,
 				ConstLabels: constLabels,
+				Buckets:     buckets.TimeBuckets,
 			},
 			requestTags,
 		),
@@ -146,6 +161,7 @@ func NewSocketCollector(pod, namespace, class string, metricsPerHost bool) (*Soc
 				Help:        "The response length (including request line, header, and request body)",
 				Namespace:   PrometheusNamespace,
 				ConstLabels: constLabels,
+				Buckets:     buckets.LengthBuckets,
 			},
 			requestTags,
 		),
@@ -156,6 +172,7 @@ func NewSocketCollector(pod, namespace, class string, metricsPerHost bool) (*Soc
 				Help:        "The request processing time in milliseconds",
 				Namespace:   PrometheusNamespace,
 				ConstLabels: constLabels,
+				Buckets:     buckets.TimeBuckets,
 			},
 			requestTags,
 		),
@@ -164,7 +181,7 @@ func NewSocketCollector(pod, namespace, class string, metricsPerHost bool) (*Soc
 				Name:        "request_size",
 				Help:        "The request length (including request line, header, and request body)",
 				Namespace:   PrometheusNamespace,
-				Buckets:     prometheus.LinearBuckets(10, 10, 10), // 10 buckets, each 10 bytes wide.
+				Buckets:     buckets.LengthBuckets,
 				ConstLabels: constLabels,
 			},
 			requestTags,
@@ -177,7 +194,7 @@ func NewSocketCollector(pod, namespace, class string, metricsPerHost bool) (*Soc
 				Namespace:   PrometheusNamespace,
 				ConstLabels: constLabels,
 			},
-			[]string{"ingress", "namespace", "status", "service"},
+			requestTags,
 		),
 
 		bytesSent: prometheus.NewHistogramVec(
@@ -185,10 +202,21 @@ func NewSocketCollector(pod, namespace, class string, metricsPerHost bool) (*Soc
 				Name:        "bytes_sent",
 				Help:        "The number of bytes sent to a client",
 				Namespace:   PrometheusNamespace,
-				Buckets:     prometheus.ExponentialBuckets(10, 10, 7), // 7 buckets, exponential factor of 10.
+				Buckets:     buckets.SizeBuckets,
 				ConstLabels: constLabels,
 			},
 			requestTags,
+		),
+
+		upstreamHeaderTime: prometheus.NewSummaryVec(
+			prometheus.SummaryOpts{
+				Name:        "ingress_upstream_header_seconds",
+				Help:        "The time spent on receiving first header from the upstream server",
+				Namespace:   PrometheusNamespace,
+				ConstLabels: constLabels,
+				Objectives:  defObjectives,
+			},
+			[]string{"ingress", "namespace", "service", "canary"},
 		),
 
 		upstreamLatency: prometheus.NewSummaryVec(
@@ -199,11 +227,12 @@ func NewSocketCollector(pod, namespace, class string, metricsPerHost bool) (*Soc
 				ConstLabels: constLabels,
 				Objectives:  defObjectives,
 			},
-			[]string{"ingress", "namespace", "service"},
+			[]string{"ingress", "namespace", "service", "canary"},
 		),
 	}
 
 	sc.metricMapping = map[string]interface{}{
+		prometheus.BuildFQName(PrometheusNamespace, "", "requests"):                 sc.requests,
 		prometheus.BuildFQName(PrometheusNamespace, "", "request_duration_seconds"): sc.requestTime,
 		prometheus.BuildFQName(PrometheusNamespace, "", "request_size"):             sc.requestLength,
 
@@ -212,6 +241,7 @@ func NewSocketCollector(pod, namespace, class string, metricsPerHost bool) (*Soc
 
 		prometheus.BuildFQName(PrometheusNamespace, "", "bytes_sent"): sc.bytesSent,
 
+		prometheus.BuildFQName(PrometheusNamespace, "", "ingress_upstream_header_seconds"):  sc.upstreamHeaderTime,
 		prometheus.BuildFQName(PrometheusNamespace, "", "ingress_upstream_latency_seconds"): sc.upstreamLatency,
 	}
 
@@ -235,6 +265,10 @@ func (sc *SocketCollector) handleMessage(msg []byte) {
 			continue
 		}
 
+		if sc.reportStatusClasses && len(stats.Status) > 0 {
+			stats.Status = fmt.Sprintf("%cxx", stats.Status[0])
+		}
+
 		// Note these must match the order in requestTags at the top
 		requestLabels := prometheus.Labels{
 			"status":    stats.Status,
@@ -243,9 +277,7 @@ func (sc *SocketCollector) handleMessage(msg []byte) {
 			"namespace": stats.Namespace,
 			"ingress":   stats.Ingress,
 			"service":   stats.Service,
-		}
-		if sc.metricsPerHost {
-			requestLabels["host"] = stats.Host
+			"canary":    stats.Canary,
 		}
 
 		collectorLabels := prometheus.Labels{
@@ -253,12 +285,20 @@ func (sc *SocketCollector) handleMessage(msg []byte) {
 			"ingress":   stats.Ingress,
 			"status":    stats.Status,
 			"service":   stats.Service,
+			"canary":    stats.Canary,
+			"method":    stats.Method,
+			"path":      stats.Path,
+		}
+		if sc.metricsPerHost {
+			requestLabels["host"] = stats.Host
+			collectorLabels["host"] = stats.Host
 		}
 
 		latencyLabels := prometheus.Labels{
 			"namespace": stats.Namespace,
 			"ingress":   stats.Ingress,
 			"service":   stats.Service,
+			"canary":    stats.Canary,
 		}
 
 		requestsMetric, err := sc.requests.GetMetricWith(collectorLabels)
@@ -274,6 +314,15 @@ func (sc *SocketCollector) handleMessage(msg []byte) {
 				klog.ErrorS(err, "Error fetching latency metric")
 			} else {
 				latencyMetric.Observe(stats.Latency)
+			}
+		}
+
+		if stats.HeaderTime != -1 {
+			headerTimeMetric, err := sc.upstreamHeaderTime.GetMetricWith(latencyLabels)
+			if err != nil {
+				klog.ErrorS(err, "Error fetching header time metric")
+			} else {
+				headerTimeMetric.Observe(stats.HeaderTime)
 			}
 		}
 
@@ -399,6 +448,12 @@ func (sc *SocketCollector) RemoveMetrics(ingresses []string, registry prometheus
 					klog.V(2).InfoS("metric not removed", "name", metricName, "ingress", ingKey, "labels", labels)
 				}
 			}
+
+			if c, ok := metric.(*prometheus.CounterVec); ok {
+				if removed := c.Delete(labels); !removed {
+					klog.V(2).InfoS("metric not removed", "name", metricName, "ingress", ingKey, "labels", labels)
+				}
+			}
 		}
 	}
 }
@@ -411,6 +466,7 @@ func (sc SocketCollector) Describe(ch chan<- *prometheus.Desc) {
 	sc.requests.Describe(ch)
 
 	sc.upstreamLatency.Describe(ch)
+	sc.upstreamHeaderTime.Describe(ch)
 
 	sc.responseTime.Describe(ch)
 	sc.responseLength.Describe(ch)
@@ -426,6 +482,7 @@ func (sc SocketCollector) Collect(ch chan<- prometheus.Metric) {
 	sc.requests.Collect(ch)
 
 	sc.upstreamLatency.Collect(ch)
+	sc.upstreamHeaderTime.Collect(ch)
 
 	sc.responseTime.Collect(ch)
 	sc.responseLength.Collect(ch)
@@ -442,7 +499,7 @@ func (sc *SocketCollector) SetHosts(hosts sets.String) {
 // handleMessages process the content received in a network connection
 func handleMessages(conn io.ReadCloser, fn func([]byte)) {
 	defer conn.Close()
-	data, err := ioutil.ReadAll(conn)
+	data, err := io.ReadAll(conn)
 	if err != nil {
 		return
 	}

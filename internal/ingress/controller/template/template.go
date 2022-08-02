@@ -24,7 +24,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand" // #nosec
 	"net"
 	"net/url"
@@ -32,18 +31,18 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	text_template "text/template"
 	"time"
 
-	"github.com/pkg/errors"
-
-	networkingv1beta1 "k8s.io/api/networking/v1beta1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
 	"k8s.io/ingress-nginx/internal/ingress"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/influxdb"
+	"k8s.io/ingress-nginx/internal/ingress/annotations/parser"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/ratelimit"
 	"k8s.io/ingress-nginx/internal/ingress/controller/config"
 	ing_net "k8s.io/ingress-nginx/internal/net"
@@ -61,8 +60,11 @@ const (
 	stateComment
 )
 
-// TemplateWriter is the interface to render a template
-type TemplateWriter interface {
+// Writer is the interface to render a template
+type Writer interface {
+	// Write renders the template.
+	// NOTE: Implementors must ensure that the content of the returned slice is not modified by the implementation
+	// after the return of this function.
 	Write(conf config.TemplateConfig) ([]byte, error)
 }
 
@@ -76,9 +78,9 @@ type Template struct {
 //NewTemplate returns a new Template instance or an
 //error if the specified template file contains errors
 func NewTemplate(file string) (*Template, error) {
-	data, err := ioutil.ReadFile(file)
+	data, err := os.ReadFile(file)
 	if err != nil {
-		return nil, errors.Wrapf(err, "unexpected error reading template %v", file)
+		return nil, fmt.Errorf("unexpected error reading template %s: %w", file, err)
 	}
 
 	tmpl, err := text_template.New("nginx.tmpl").Funcs(funcMap).Parse(string(data))
@@ -202,7 +204,12 @@ func (t *Template) Write(conf config.TemplateConfig) ([]byte, error) {
 		return nil, err
 	}
 
-	return outCmdBuf.Bytes(), nil
+	// make a copy to ensure that we are no longer modifying the content of the buffer
+	out := outCmdBuf.Bytes()
+	res := make([]byte, len(out))
+	copy(res, out)
+
+	return res, nil
 }
 
 var (
@@ -221,7 +228,12 @@ var (
 		"buildAuthLocation":               buildAuthLocation,
 		"shouldApplyGlobalAuth":           shouldApplyGlobalAuth,
 		"buildAuthResponseHeaders":        buildAuthResponseHeaders,
+		"buildAuthUpstreamLuaHeaders":     buildAuthUpstreamLuaHeaders,
 		"buildAuthProxySetHeaders":        buildAuthProxySetHeaders,
+		"buildAuthUpstreamName":           buildAuthUpstreamName,
+		"shouldApplyAuthUpstream":         shouldApplyAuthUpstream,
+		"extractHostPort":                 extractHostPort,
+		"changeHostPort":                  changeHostPort,
 		"buildProxyPass":                  buildProxyPass,
 		"filterRateLimits":                filterRateLimits,
 		"buildRateLimitZones":             buildRateLimitZones,
@@ -268,6 +280,7 @@ var (
 		"shouldLoadAuthDigestModule":         shouldLoadAuthDigestModule,
 		"shouldLoadInfluxDBModule":           shouldLoadInfluxDBModule,
 		"buildServerName":                    buildServerName,
+		"buildCorsOriginRegex":               buildCorsOriginRegex,
 	}
 )
 
@@ -330,7 +343,8 @@ func buildLuaSharedDictionaries(c interface{}, s interface{}) string {
 	}
 
 	for name, size := range cfg.LuaSharedDicts {
-		out = append(out, fmt.Sprintf("lua_shared_dict %s %dM", name, size))
+		sizeStr := dictKbToStr(size)
+		out = append(out, fmt.Sprintf("lua_shared_dict %s %s", name, sizeStr))
 	}
 
 	sort.Strings(out)
@@ -342,16 +356,16 @@ func luaConfigurationRequestBodySize(c interface{}) string {
 	cfg, ok := c.(config.Configuration)
 	if !ok {
 		klog.Errorf("expected a 'config.Configuration' type but %T was returned", c)
-		return "100" // just a default number
+		return "100M" // just a default number
 	}
 
 	size := cfg.LuaSharedDicts["configuration_data"]
 	if size < cfg.LuaSharedDicts["certificate_data"] {
 		size = cfg.LuaSharedDicts["certificate_data"]
 	}
-	size = size + 1
+	size = size + 1024
 
-	return fmt.Sprintf("%d", size)
+	return dictKbToStr(size)
 }
 
 // configForLua returns some general configuration as Lua table represented as string
@@ -519,7 +533,7 @@ func buildLocation(input interface{}, enforceRegex bool) string {
 		return fmt.Sprintf(`~* "^%s"`, path)
 	}
 
-	if location.PathType != nil && *location.PathType == networkingv1beta1.PathTypeExact {
+	if location.PathType != nil && *location.PathType == networkingv1.PathTypeExact {
 		return fmt.Sprintf(`= %s`, path)
 	}
 
@@ -564,7 +578,14 @@ func shouldApplyGlobalAuth(input interface{}, globalExternalAuthURL string) bool
 	return false
 }
 
-func buildAuthResponseHeaders(headers []string) []string {
+// buildAuthResponseHeaders sets HTTP response headers when `auth-url` is used.
+// Based on `auth-keepalive` value we use auth_request_set Nginx directives, or
+// we use Lua and Nginx variables instead.
+//
+// NOTE: Unfortunately auth_request module ignores the keepalive directive (see:
+// https://trac.nginx.org/nginx/ticket/1579), that is why we mimic the same
+// functionality with access_by_lua_block.
+func buildAuthResponseHeaders(proxySetHeader string, headers []string, lua bool) []string {
 	res := []string{}
 
 	if len(headers) == 0 {
@@ -572,10 +593,27 @@ func buildAuthResponseHeaders(headers []string) []string {
 	}
 
 	for i, h := range headers {
-		hvar := strings.ToLower(h)
-		hvar = strings.NewReplacer("-", "_").Replace(hvar)
-		res = append(res, fmt.Sprintf("auth_request_set $authHeader%v $upstream_http_%v;", i, hvar))
-		res = append(res, fmt.Sprintf("proxy_set_header '%v' $authHeader%v;", h, i))
+		if lua {
+			res = append(res, fmt.Sprintf("set $authHeader%d '';", i))
+		} else {
+			hvar := strings.ToLower(h)
+			hvar = strings.NewReplacer("-", "_").Replace(hvar)
+			res = append(res, fmt.Sprintf("auth_request_set $authHeader%v $upstream_http_%v;", i, hvar))
+		}
+		res = append(res, fmt.Sprintf("%s '%v' $authHeader%v;", proxySetHeader, h, i))
+	}
+	return res
+}
+
+func buildAuthUpstreamLuaHeaders(headers []string) []string {
+	res := []string{}
+
+	if len(headers) == 0 {
+		return res
+	}
+
+	for i, h := range headers {
+		res = append(res, fmt.Sprintf("ngx.var.authHeader%d = res.header['%s']", i, h))
 	}
 	return res
 }
@@ -592,6 +630,76 @@ func buildAuthProxySetHeaders(headers map[string]string) []string {
 	}
 	sort.Strings(res)
 	return res
+}
+
+func buildAuthUpstreamName(input interface{}, host string) string {
+	authPath := buildAuthLocation(input, "")
+	if authPath == "" || host == "" {
+		return ""
+	}
+
+	return fmt.Sprintf("%s-%s", host, authPath[2:])
+}
+
+// shouldApplyAuthUpstream returns true only in case when ExternalAuth.URL and
+// ExternalAuth.KeepaliveConnections are all set
+func shouldApplyAuthUpstream(l interface{}, c interface{}) bool {
+	location, ok := l.(*ingress.Location)
+	if !ok {
+		klog.Errorf("expected an '*ingress.Location' type but %T was returned", l)
+		return false
+	}
+
+	cfg, ok := c.(config.Configuration)
+	if !ok {
+		klog.Errorf("expected a 'config.Configuration' type but %T was returned", c)
+		return false
+	}
+
+	if location.ExternalAuth.URL == "" || location.ExternalAuth.KeepaliveConnections == 0 {
+		return false
+	}
+
+	// Unfortunately, `auth_request` module ignores keepalive in upstream block: https://trac.nginx.org/nginx/ticket/1579
+	// The workaround is to use `ngx.location.capture` Lua subrequests but it is not supported with HTTP/2
+	if cfg.UseHTTP2 {
+		klog.Warning("Upstream keepalive is not supported with HTTP/2")
+		return false
+	}
+
+	return true
+}
+
+// extractHostPort will extract the host:port part from the URL specified by url
+func extractHostPort(url string) string {
+	if url == "" {
+		return ""
+	}
+
+	authURL, err := parser.StringToURL(url)
+	if err != nil {
+		klog.Errorf("expected a valid URL but %s was returned", url)
+		return ""
+	}
+
+	return authURL.Host
+}
+
+// changeHostPort will change the host:port part of the url to value
+func changeHostPort(url string, value string) string {
+	if url == "" {
+		return ""
+	}
+
+	authURL, err := parser.StringToURL(url)
+	if err != nil {
+		klog.Errorf("expected a valid URL but %s was returned", url)
+		return ""
+	}
+
+	authURL.Host = value
+
+	return authURL.String()
 }
 
 // buildProxyPass produces the proxy pass string, if the ingress has redirects
@@ -617,6 +725,8 @@ func buildProxyPass(host string, b interface{}, loc interface{}) string {
 	proxyPass := "proxy_pass"
 
 	switch location.BackendProtocol {
+	case "AUTO_HTTP":
+		proto = "$scheme://"
 	case "HTTPS":
 		proto = "https://"
 	case "GRPC":
@@ -667,7 +777,7 @@ func buildProxyPass(host string, b interface{}, loc interface{}) string {
 		var xForwardedPrefix string
 
 		if len(location.XForwardedPrefix) > 0 {
-			xForwardedPrefix = fmt.Sprintf("proxy_set_header X-Forwarded-Prefix \"%s\";\n", location.XForwardedPrefix)
+			xForwardedPrefix = fmt.Sprintf("%s X-Forwarded-Prefix \"%s\";\n", proxySetHeader(location), location.XForwardedPrefix)
 		}
 
 		return fmt.Sprintf(`
@@ -983,10 +1093,12 @@ func getIngressInformation(i, h, p interface{}) *ingressInformation {
 		info.Path = "/"
 	}
 
-	if ing.Spec.Backend != nil {
-		info.Service = ing.Spec.Backend.ServiceName
-		if ing.Spec.Backend.ServicePort.String() != "0" {
-			info.ServicePort = ing.Spec.Backend.ServicePort.String()
+	if ing.Spec.DefaultBackend != nil && ing.Spec.DefaultBackend.Service != nil {
+		info.Service = ing.Spec.DefaultBackend.Service.Name
+		if ing.Spec.DefaultBackend.Service.Port.Number > 0 {
+			info.ServicePort = strconv.Itoa(int(ing.Spec.DefaultBackend.Service.Port.Number))
+		} else {
+			info.ServicePort = ing.Spec.DefaultBackend.Service.Port.Name
 		}
 	}
 
@@ -1013,14 +1125,20 @@ func getIngressInformation(i, h, p interface{}) *ingressInformation {
 				continue
 			}
 
-			if info.Service != "" && rPath.Backend.ServiceName == "" {
+			if rPath.Backend.Service == nil {
+				continue
+			}
+
+			if info.Service != "" && rPath.Backend.Service.Name == "" {
 				// empty rule. Only contains a Path and PathType
 				return info
 			}
 
-			info.Service = rPath.Backend.ServiceName
-			if rPath.Backend.ServicePort.String() != "0" {
-				info.ServicePort = rPath.Backend.ServicePort.String()
+			info.Service = rPath.Backend.Service.Name
+			if rPath.Backend.Service.Port.Number > 0 {
+				info.ServicePort = strconv.Itoa(int(rPath.Backend.Service.Port.Number))
+			} else {
+				info.ServicePort = rPath.Backend.Service.Port.Name
 			}
 
 			return info
@@ -1101,7 +1219,7 @@ func buildOpentracing(c interface{}, s interface{}) string {
 	buf := bytes.NewBufferString("")
 
 	if cfg.DatadogCollectorHost != "" {
-		buf.WriteString("opentracing_load_tracer /usr/local/lib64/libdd_opentracing.so /etc/nginx/opentracing.json;")
+		buf.WriteString("opentracing_load_tracer /usr/local/lib/libdd_opentracing.so /etc/nginx/opentracing.json;")
 	} else if cfg.ZipkinCollectorHost != "" {
 		buf.WriteString("opentracing_load_tracer /usr/local/lib/libzipkin_opentracing_plugin.so /etc/nginx/opentracing.json;")
 	} else if cfg.JaegerCollectorHost != "" || cfg.JaegerEndpoint != "" {
@@ -1159,15 +1277,17 @@ func proxySetHeader(loc interface{}) string {
 
 // buildCustomErrorDeps is a utility function returning a struct wrapper with
 // the data required to build the 'CUSTOM_ERRORS' template
-func buildCustomErrorDeps(upstreamName string, errorCodes []int, enableMetrics bool) interface{} {
+func buildCustomErrorDeps(upstreamName string, errorCodes []int, enableMetrics bool, modsecurityEnabled bool) interface{} {
 	return struct {
-		UpstreamName  string
-		ErrorCodes    []int
-		EnableMetrics bool
+		UpstreamName       string
+		ErrorCodes         []int
+		EnableMetrics      bool
+		ModsecurityEnabled bool
 	}{
-		UpstreamName:  upstreamName,
-		ErrorCodes:    errorCodes,
-		EnableMetrics: enableMetrics,
+		UpstreamName:       upstreamName,
+		ErrorCodes:         errorCodes,
+		EnableMetrics:      enableMetrics,
+		ModsecurityEnabled: modsecurityEnabled,
 	}
 }
 
@@ -1429,7 +1549,7 @@ func httpsListener(addresses []string, co string, tc config.TemplateConfig) []st
 	return out
 }
 
-func buildOpentracingForLocation(isOTEnabled bool, location *ingress.Location) string {
+func buildOpentracingForLocation(isOTEnabled bool, isOTTrustSet bool, location *ingress.Location) string {
 	isOTEnabledInLoc := location.Opentracing.Enabled
 	isOTSetInLoc := location.Opentracing.Set
 
@@ -1437,25 +1557,21 @@ func buildOpentracingForLocation(isOTEnabled bool, location *ingress.Location) s
 		if isOTSetInLoc && !isOTEnabledInLoc {
 			return "opentracing off;"
 		}
-
-		opc := opentracingPropagateContext(location)
-		if opc != "" {
-			opc = fmt.Sprintf("opentracing on;\n%v", opc)
-		}
-
-		return opc
+	} else if !isOTSetInLoc || !isOTEnabledInLoc {
+		return ""
 	}
 
-	if isOTSetInLoc && isOTEnabledInLoc {
-		opc := opentracingPropagateContext(location)
-		if opc != "" {
-			opc = fmt.Sprintf("opentracing on;\n%v", opc)
-		}
-
-		return opc
+	opc := opentracingPropagateContext(location)
+	if opc != "" {
+		opc = fmt.Sprintf("opentracing on;\n%v", opc)
 	}
 
-	return ""
+	if (!isOTTrustSet && !location.Opentracing.TrustSet) ||
+		(location.Opentracing.TrustSet && !location.Opentracing.TrustEnabled) {
+		opc = opc + "\nopentracing_trust_incoming_span off;"
+	}
+
+	return opc
 }
 
 // shouldLoadOpentracingModule determines whether or not the Opentracing module needs to be loaded.
@@ -1521,7 +1637,7 @@ func buildModSecurityForLocation(cfg config.Configuration, location *ingress.Loc
 `, location.ModSecurity.TransactionID))
 	}
 
-	if !isMSEnabled {
+	if !isMSEnabled && location.ModSecurity.Snippet == "" {
 		buffer.WriteString(`modsecurity_rules_file /etc/nginx/modsecurity/modsecurity.conf;
 `)
 	}
@@ -1551,10 +1667,11 @@ func buildMirrorLocations(locs []*ingress.Location) string {
 		mapped.Insert(loc.Mirror.Source)
 		buffer.WriteString(fmt.Sprintf(`location = %v {
 internal;
+proxy_set_header Host %v;
 proxy_pass %v;
 }
 
-`, loc.Mirror.Source, loc.Mirror.Target))
+`, loc.Mirror.Source, loc.Mirror.Host, loc.Mirror.Target))
 	}
 
 	return buffer.String()
@@ -1660,4 +1777,30 @@ func convertGoSliceIntoLuaTable(goSliceInterface interface{}, emptyStringAsNil b
 	default:
 		return "", fmt.Errorf("could not process type: %s", kind)
 	}
+}
+
+func buildOriginRegex(origin string) string {
+	origin = regexp.QuoteMeta(origin)
+	origin = strings.Replace(origin, "\\*", `[A-Za-z0-9\-]+`, 1)
+	return fmt.Sprintf("(%s)", origin)
+}
+
+func buildCorsOriginRegex(corsOrigins []string) string {
+	if len(corsOrigins) == 1 && corsOrigins[0] == "*" {
+		return "set $http_origin *;\nset $cors 'true';"
+	}
+
+	var originsRegex string = "if ($http_origin ~* ("
+	for i, origin := range corsOrigins {
+		originTrimmed := strings.TrimSpace(origin)
+		if len(originTrimmed) > 0 {
+			builtOrigin := buildOriginRegex(originTrimmed)
+			originsRegex += builtOrigin
+			if i != len(corsOrigins)-1 {
+				originsRegex = originsRegex + "|"
+			}
+		}
+	}
+	originsRegex = originsRegex + ")$ ) { set $cors 'true'; }"
+	return originsRegex
 }

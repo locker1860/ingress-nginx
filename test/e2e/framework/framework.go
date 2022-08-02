@@ -24,17 +24,15 @@ import (
 
 	"github.com/gavv/httpexpect/v2"
 	"github.com/onsi/ginkgo"
-	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
-	networking "k8s.io/api/networking/v1beta1"
+	networking "k8s.io/api/networking/v1"
 	apiextcs "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -62,15 +60,15 @@ var (
 type Framework struct {
 	BaseName string
 
-	IsIngressV1Ready      bool
-	IsIngressV1Beta1Ready bool
+	IsIngressV1Ready bool
 
 	// A Kubernetes and Service Catalog client
 	KubeClientSet          kubernetes.Interface
 	KubeConfig             *restclient.Config
 	APIExtensionsClientSet apiextcs.Interface
 
-	Namespace string
+	Namespace    string
+	IngressClass string
 
 	pod *corev1.Pod
 }
@@ -90,8 +88,22 @@ func NewDefaultFramework(baseName string) *Framework {
 	return f
 }
 
-// BeforeEach gets a client and makes a namespace.
-func (f *Framework) BeforeEach() {
+// NewSimpleFramework makes a new framework that allows the usage of a namespace
+// for arbitraty tests.
+func NewSimpleFramework(baseName string) *Framework {
+	defer ginkgo.GinkgoRecover()
+
+	f := &Framework{
+		BaseName: baseName,
+	}
+
+	ginkgo.BeforeEach(f.CreateEnvironment)
+	ginkgo.AfterEach(f.DestroyEnvironment)
+
+	return f
+}
+
+func (f *Framework) CreateEnvironment() {
 	var err error
 
 	if f.KubeClientSet == nil {
@@ -104,11 +116,29 @@ func (f *Framework) BeforeEach() {
 		f.KubeClientSet, err = kubernetes.NewForConfig(f.KubeConfig)
 		assert.Nil(ginkgo.GinkgoT(), err, "creating a kubernetes client")
 
-		_, f.IsIngressV1Beta1Ready, f.IsIngressV1Ready = k8s.NetworkingIngressAvailable(f.KubeClientSet)
+		f.IsIngressV1Ready = k8s.NetworkingIngressAvailable(f.KubeClientSet)
 	}
 
 	f.Namespace, err = CreateKubeNamespace(f.BaseName, f.KubeClientSet)
 	assert.Nil(ginkgo.GinkgoT(), err, "creating namespace")
+}
+
+func (f *Framework) DestroyEnvironment() {
+	go func() {
+		defer ginkgo.GinkgoRecover()
+		err := DeleteKubeNamespace(f.KubeClientSet, f.Namespace)
+		assert.Nil(ginkgo.GinkgoT(), err, "deleting namespace %v", f.Namespace)
+	}()
+}
+
+// BeforeEach gets a client and makes a namespace.
+func (f *Framework) BeforeEach() {
+	var err error
+
+	f.CreateEnvironment()
+
+	f.IngressClass, err = CreateIngressClass(f.Namespace, f.KubeClientSet)
+	assert.Nil(ginkgo.GinkgoT(), err, "creating IngressClass")
 
 	err = f.newIngressController(f.Namespace, f.BaseName)
 	assert.Nil(ginkgo.GinkgoT(), err, "deploying the ingress controller")
@@ -121,13 +151,15 @@ func (f *Framework) BeforeEach() {
 
 // AfterEach deletes the namespace, after reading its events.
 func (f *Framework) AfterEach() {
-	defer func(kubeClient kubernetes.Interface, ns string) {
+	defer f.DestroyEnvironment()
+
+	defer func(kubeClient kubernetes.Interface, ingressclass string) {
 		go func() {
 			defer ginkgo.GinkgoRecover()
-			err := deleteKubeNamespace(kubeClient, ns)
-			assert.Nil(ginkgo.GinkgoT(), err, "deleting namespace %v", f.Namespace)
+			err := deleteIngressClass(kubeClient, ingressclass)
+			assert.Nil(ginkgo.GinkgoT(), err, "deleting IngressClass")
 		}()
-	}(f.KubeClientSet, f.Namespace)
+	}(f.KubeClientSet, f.IngressClass)
 
 	if !ginkgo.CurrentGinkgoTestDescription().Failed {
 		return
@@ -416,26 +448,35 @@ func (f *Framework) DeleteNGINXPod(grace int64) {
 	assert.Nil(ginkgo.GinkgoT(), err, "while waiting for ingress nginx pod to come up again")
 }
 
+// HTTPDumbTestClient returns a new httpexpect client without BaseURL.
+func (f *Framework) HTTPDumbTestClient() *httpexpect.Expect {
+	return f.newTestClient(nil, false)
+}
+
 // HTTPTestClient returns a new httpexpect client for end-to-end HTTP testing.
 func (f *Framework) HTTPTestClient() *httpexpect.Expect {
-	return f.newTestClient(nil)
+	return f.newTestClient(nil, true)
 }
 
 // HTTPTestClientWithTLSConfig returns a new httpexpect client for end-to-end
 // HTTP testing with a custom TLS configuration.
 func (f *Framework) HTTPTestClientWithTLSConfig(config *tls.Config) *httpexpect.Expect {
-	return f.newTestClient(config)
+	return f.newTestClient(config, true)
 }
 
-func (f *Framework) newTestClient(config *tls.Config) *httpexpect.Expect {
+func (f *Framework) newTestClient(config *tls.Config, setIngressURL bool) *httpexpect.Expect {
 	if config == nil {
 		config = &tls.Config{
 			InsecureSkipVerify: true,
 		}
 	}
+	var baseURL string
+	if setIngressURL {
+		baseURL = f.GetURL(HTTP)
+	}
 
 	return httpexpect.WithConfig(httpexpect.Config{
-		BaseURL: f.GetURL(HTTP),
+		BaseURL: baseURL,
 		Client: &http.Client{
 			Transport: &http.Transport{
 				TLSClientConfig: config,
@@ -476,6 +517,19 @@ func (f *Framework) WaitForNginxListening(port int) {
 	assert.Nil(ginkgo.GinkgoT(), err, "waiting for ingress controller pod listening on port 80")
 }
 
+// WaitForPod waits for a specific Pod to be ready, using a label selector
+func (f *Framework) WaitForPod(selector string, timeout time.Duration, shouldFail bool) {
+	err := waitForPodsReady(f.KubeClientSet, timeout, 1, f.Namespace, metav1.ListOptions{
+		LabelSelector: selector,
+	})
+
+	if shouldFail {
+		assert.NotNil(ginkgo.GinkgoT(), err, "waiting for pods to be ready")
+	} else {
+		assert.Nil(ginkgo.GinkgoT(), err, "waiting for pods to be ready")
+	}
+}
+
 // UpdateDeployment runs the given updateFunc on the deployment and waits for it to be updated
 func UpdateDeployment(kubeClientSet kubernetes.Interface, namespace string, name string, replicas int, updateFunc func(d *appsv1.Deployment) error) error {
 	deployment, err := kubeClientSet.AppsV1().Deployments(namespace).Get(context.TODO(), name, metav1.GetOptions{})
@@ -498,7 +552,7 @@ func UpdateDeployment(kubeClientSet kubernetes.Interface, namespace string, name
 		deployment.Spec.Replicas = NewInt32(int32(replicas))
 		_, err = kubeClientSet.AppsV1().Deployments(namespace).Update(context.TODO(), deployment, metav1.UpdateOptions{})
 		if err != nil {
-			return errors.Wrapf(err, "scaling the number of replicas to %v", replicas)
+			return fmt.Errorf("scaling the number of replicas to %d: %w", replicas, err)
 		}
 
 		err = waitForDeploymentRollout(kubeClientSet, deployment)
@@ -511,7 +565,7 @@ func UpdateDeployment(kubeClientSet kubernetes.Interface, namespace string, name
 		LabelSelector: fields.SelectorFromSet(fields.Set(deployment.Spec.Template.ObjectMeta.Labels)).String(),
 	})
 	if err != nil {
-		return errors.Wrapf(err, "waiting for nginx-ingress-controller replica count to be %v", replicas)
+		return fmt.Errorf("waiting for nginx-ingress-controller replica count to be %d: %w", replicas, err)
 	}
 
 	return nil
@@ -542,7 +596,7 @@ func waitForDeploymentRollout(kubeClientSet kubernetes.Interface, resource *apps
 
 // UpdateIngress runs the given updateFunc on the ingress
 func UpdateIngress(kubeClientSet kubernetes.Interface, namespace string, name string, updateFunc func(d *networking.Ingress) error) error {
-	ingress, err := kubeClientSet.NetworkingV1beta1().Ingresses(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+	ingress, err := kubeClientSet.NetworkingV1().Ingresses(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -559,7 +613,7 @@ func UpdateIngress(kubeClientSet kubernetes.Interface, namespace string, name st
 		return err
 	}
 
-	_, err = kubeClientSet.NetworkingV1beta1().Ingresses(namespace).Update(context.TODO(), ingress, metav1.UpdateOptions{})
+	_, err = kubeClientSet.NetworkingV1().Ingresses(namespace).Update(context.TODO(), ingress, metav1.UpdateOptions{})
 	if err != nil {
 		return err
 	}
@@ -578,9 +632,17 @@ func NewSingleIngress(name, path, host, ns, service string, port int, annotation
 	return newSingleIngressWithRules(name, path, host, ns, service, port, annotations, nil)
 }
 
+func NewSingleIngressWithIngressClass(name, path, host, ns, service, ingressClass string, port int, annotations map[string]string) *networking.Ingress {
+	ing := newSingleIngressWithRules(name, path, host, ns, service, port, annotations, nil)
+	ing.Spec.IngressClassName = &ingressClass
+	return ing
+}
+
 // NewSingleIngressWithMultiplePaths creates a simple ingress rule with multiple paths
 func NewSingleIngressWithMultiplePaths(name string, paths []string, host, ns, service string, port int, annotations map[string]string) *networking.Ingress {
+	pathtype := networking.PathTypePrefix
 	spec := networking.IngressSpec{
+		IngressClassName: GetIngressClassName(ns),
 		Rules: []networking.IngressRule{
 			{
 				Host: host,
@@ -593,10 +655,15 @@ func NewSingleIngressWithMultiplePaths(name string, paths []string, host, ns, se
 
 	for _, path := range paths {
 		spec.Rules[0].IngressRuleValue.HTTP.Paths = append(spec.Rules[0].IngressRuleValue.HTTP.Paths, networking.HTTPIngressPath{
-			Path: path,
+			Path:     path,
+			PathType: &pathtype,
 			Backend: networking.IngressBackend{
-				ServiceName: service,
-				ServicePort: intstr.FromInt(port),
+				Service: &networking.IngressServiceBackend{
+					Name: service,
+					Port: networking.ServiceBackendPort{
+						Number: int32(port),
+					},
+				},
 			},
 		})
 	}
@@ -605,17 +672,24 @@ func NewSingleIngressWithMultiplePaths(name string, paths []string, host, ns, se
 }
 
 func newSingleIngressWithRules(name, path, host, ns, service string, port int, annotations map[string]string, tlsHosts []string) *networking.Ingress {
+	pathtype := networking.PathTypePrefix
 	spec := networking.IngressSpec{
+		IngressClassName: GetIngressClassName(ns),
 		Rules: []networking.IngressRule{
 			{
 				IngressRuleValue: networking.IngressRuleValue{
 					HTTP: &networking.HTTPIngressRuleValue{
 						Paths: []networking.HTTPIngressPath{
 							{
-								Path: path,
+								Path:     path,
+								PathType: &pathtype,
 								Backend: networking.IngressBackend{
-									ServiceName: service,
-									ServicePort: intstr.FromInt(port),
+									Service: &networking.IngressServiceBackend{
+										Name: service,
+										Port: networking.ServiceBackendPort{
+											Number: int32(port),
+										},
+									},
 								},
 							},
 						},
@@ -644,10 +718,16 @@ func newSingleIngressWithRules(name, path, host, ns, service string, port int, a
 
 // NewSingleIngressWithBackendAndRules creates an ingress with both a default backend and a rule
 func NewSingleIngressWithBackendAndRules(name, path, host, ns, defaultService string, defaultPort int, service string, port int, annotations map[string]string) *networking.Ingress {
+	pathtype := networking.PathTypePrefix
 	spec := networking.IngressSpec{
-		Backend: &networking.IngressBackend{
-			ServiceName: defaultService,
-			ServicePort: intstr.FromInt(defaultPort),
+		IngressClassName: GetIngressClassName(ns),
+		DefaultBackend: &networking.IngressBackend{
+			Service: &networking.IngressServiceBackend{
+				Name: defaultService,
+				Port: networking.ServiceBackendPort{
+					Number: int32(defaultPort),
+				},
+			},
 		},
 		Rules: []networking.IngressRule{
 			{
@@ -656,10 +736,15 @@ func NewSingleIngressWithBackendAndRules(name, path, host, ns, defaultService st
 					HTTP: &networking.HTTPIngressRuleValue{
 						Paths: []networking.HTTPIngressPath{
 							{
-								Path: path,
+								Path:     path,
+								PathType: &pathtype,
 								Backend: networking.IngressBackend{
-									ServiceName: service,
-									ServicePort: intstr.FromInt(port),
+									Service: &networking.IngressServiceBackend{
+										Name: service,
+										Port: networking.ServiceBackendPort{
+											Number: int32(port),
+										},
+									},
 								},
 							},
 						},
@@ -675,9 +760,14 @@ func NewSingleIngressWithBackendAndRules(name, path, host, ns, defaultService st
 // NewSingleCatchAllIngress creates a simple ingress with a catch-all backend
 func NewSingleCatchAllIngress(name, ns, service string, port int, annotations map[string]string) *networking.Ingress {
 	spec := networking.IngressSpec{
-		Backend: &networking.IngressBackend{
-			ServiceName: service,
-			ServicePort: intstr.FromInt(port),
+		IngressClassName: GetIngressClassName(ns),
+		DefaultBackend: &networking.IngressBackend{
+			Service: &networking.IngressServiceBackend{
+				Name: service,
+				Port: networking.ServiceBackendPort{
+					Number: int32(port),
+				},
+			},
 		},
 	}
 	return newSingleIngress(name, ns, annotations, spec)

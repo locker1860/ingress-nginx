@@ -59,8 +59,10 @@ fullnameOverride: nginx-ingress
 controller:
   image:
     repository: ingress-controller/controller
+    chroot: true
     tag: 1.0.0-dev
     digest:
+    digestChroot:
   scope:
     enabled: true
   config:
@@ -73,6 +75,10 @@ controller:
     periodSeconds: 1
   service:
     type: NodePort
+  electionID: ingress-controller-leader
+  ingressClassResource:
+    # We will create and remove each IC/ClusterRole/ClusterRoleBinding per test so there's no conflict
+    enabled: false
   extraArgs:
     tcp-services-configmap: $NAMESPACE/tcp-services
     # e2e tests do not require information about ingress status

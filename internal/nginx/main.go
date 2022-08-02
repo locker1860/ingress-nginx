@@ -20,7 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -28,7 +28,7 @@ import (
 	"time"
 
 	ps "github.com/mitchellh/go-ps"
-	"k8s.io/klog/v2"
+	klog "k8s.io/klog/v2"
 )
 
 // TODO: Check https://github.com/kubernetes/kubernetes/blob/master/pkg/master/ports/ports.go for ports already being used
@@ -40,7 +40,7 @@ var ProfilerPort = 10245
 var TemplatePath = "/etc/nginx/template/nginx.tmpl"
 
 // PID defines the location of the pid file used by NGINX
-var PID = "/tmp/nginx.pid"
+var PID = "/tmp/nginx/nginx.pid"
 
 // StatusPort port used by NGINX for the status server
 var StatusPort = 10246
@@ -69,7 +69,7 @@ func NewGetStatusRequest(path string) (int, []byte, error) {
 	}
 	defer res.Body.Close()
 
-	data, err := ioutil.ReadAll(res.Body)
+	data, err := io.ReadAll(res.Body)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -93,7 +93,7 @@ func NewPostStatusRequest(path, contentType string, data interface{}) (int, []by
 	}
 	defer res.Body.Close()
 
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -133,7 +133,7 @@ func readFileToString(path string) (string, error) {
 	}
 	defer f.Close()
 
-	contents, err := ioutil.ReadAll(f)
+	contents, err := io.ReadAll(f)
 	if err != nil {
 		return "", err
 	}

@@ -5,7 +5,7 @@ ConfigMaps allow you to decouple configuration artifacts from image content to k
 The ConfigMap API resource stores configuration data as key-value pairs. The data provides the configurations for system
 components for the nginx-controller.
 
-In order to overwrite nginx-controller configuration values as seen in [config.go](https://github.com/kubernetes/ingress-nginx/blob/master/internal/ingress/controller/config/config.go),
+In order to overwrite nginx-controller configuration values as seen in [config.go](https://github.com/kubernetes/ingress-nginx/blob/main/internal/ingress/controller/config/config.go),
 you can add key-value pairs to the data section of the config-map. For Example:
 
 ```yaml
@@ -29,6 +29,8 @@ The following table shows a configuration option's name, type, and the default v
 |:---|:---|:------|
 |[add-headers](#add-headers)|string|""|
 |[allow-backend-server-header](#allow-backend-server-header)|bool|"false"|
+|[allow-snippet-annotations](#allow-snippet-annotations)|bool|true|
+|[annotation-value-word-blocklist](#annotation-value-word-blocklist)|string array|""|
 |[hide-headers](#hide-headers)|string array|empty|
 |[access-log-params](#access-log-params)|string|""|
 |[access-log-path](#access-log-path)|string|"/var/log/nginx/access.log"|
@@ -54,7 +56,7 @@ The following table shows a configuration option's name, type, and the default v
 |[http2-max-field-size](#http2-max-field-size)|string|"4k"|
 |[http2-max-header-size](#http2-max-header-size)|string|"16k"|
 |[http2-max-requests](#http2-max-requests)|int|1000|
-|[http2-max-concurrent-streams](#http2-max-concurrent-streams)|int|1000|
+|[http2-max-concurrent-streams](#http2-max-concurrent-streams)|int|128|
 |[hsts](#hsts)|bool|"true"|
 |[hsts-include-subdomains](#hsts-include-subdomains)|bool|"true"|
 |[hsts-max-age](#hsts-max-age)|string|"15724800"|
@@ -97,6 +99,7 @@ The following table shows a configuration option's name, type, and the default v
 |[use-geoip2](#use-geoip2)|bool|"false"|
 |[enable-brotli](#enable-brotli)|bool|"false"|
 |[brotli-level](#brotli-level)|int|4|
+|[brotli-min-length](#brotli-min-length)|int|20|
 |[brotli-types](#brotli-types)|string|"application/xml+rss application/atom+xml application/javascript application/x-javascript application/json application/rss+xml application/vnd.ms-fontobject application/x-font-ttf application/x-web-app-manifest+json application/xhtml+xml application/xml font/opentype image/svg+xml image/x-icon text/css text/javascript text/plain text/x-component"|
 |[use-http2](#use-http2)|bool|"true"|
 |[gzip-level](#gzip-level)|int|1|
@@ -108,6 +111,7 @@ The following table shows a configuration option's name, type, and the default v
 |[variables-hash-bucket-size](#variables-hash-bucket-size)|int|128|
 |[variables-hash-max-size](#variables-hash-max-size)|int|2048|
 |[upstream-keepalive-connections](#upstream-keepalive-connections)|int|320|
+|[upstream-keepalive-time](#upstream-keepalive-time)|string|"1h"|
 |[upstream-keepalive-timeout](#upstream-keepalive-timeout)|int|60|
 |[upstream-keepalive-requests](#upstream-keepalive-requests)|int|10000|
 |[limit-conn-zone-variable](#limit-conn-zone-variable)|string|"$binary_remote_addr"|
@@ -153,6 +157,7 @@ The following table shows a configuration option's name, type, and the default v
 |[main-snippet](#main-snippet)|string|""|
 |[http-snippet](#http-snippet)|string|""|
 |[server-snippet](#server-snippet)|string|""|
+|[stream-snippet](#stream-snippet)|string|""|
 |[location-snippet](#location-snippet)|string|""|
 |[custom-http-errors](#custom-http-errors)|[]int|[]int{}|
 |[proxy-body-size](#proxy-body-size)|string|"1m"|
@@ -169,6 +174,7 @@ The following table shows a configuration option's name, type, and the default v
 |[proxy-redirect-from](#proxy-redirect-from)|string|"off"|
 |[proxy-request-buffering](#proxy-request-buffering)|string|"on"|
 |[ssl-redirect](#ssl-redirect)|bool|"true"|
+|[force-ssl-redirect](#force-ssl-redirect)|bool|"false"|
 |[whitelist-source-range](#whitelist-source-range)|[]string|[]string{}|
 |[skip-access-log-urls](#skip-access-log-urls)|[]string|[]string{}|
 |[limit-rate](#limit-rate)|int|0|
@@ -178,6 +184,9 @@ The following table shows a configuration option's name, type, and the default v
 |[proxy-buffering](#proxy-buffering)|string|"off"|
 |[limit-req-status-code](#limit-req-status-code)|int|503|
 |[limit-conn-status-code](#limit-conn-status-code)|int|503|
+|[enable-syslog](#enable-syslog)|bool|false|
+|[syslog-host](#syslog-host)|string|""|
+|[syslog-port](#syslog-port)|int|514|
 |[no-tls-redirect-locations](#no-tls-redirect-locations)|string|"/.well-known/acme-challenge"|
 |[global-auth-url](#global-auth-url)|string|""|
 |[global-auth-method](#global-auth-method)|string|""|
@@ -200,14 +209,38 @@ The following table shows a configuration option's name, type, and the default v
 |[global-rate-limit-memcached-max-idle-timeout](#global-rate-limit)|int|10000|
 |[global-rate-limit-memcached-pool-size](#global-rate-limit)|int|50|
 |[global-rate-limit-status-code](#global-rate-limit)|int|429|
+|[service-upstream](#service-upstream)|bool|"false"|
+|[ssl-reject-handshake](#ssl-reject-handshake)|bool|"false"|
+|[debug-connections](#debug-connections)|[]string|"127.0.0.1,1.1.1.1/24"|
 
 ## add-headers
 
-Sets custom headers from named configmap before sending traffic to the client. See [proxy-set-headers](#proxy-set-headers). [example](https://github.com/kubernetes/ingress-nginx/tree/master/docs/examples/customization/custom-headers)
+Sets custom headers from named configmap before sending traffic to the client. See [proxy-set-headers](#proxy-set-headers). [example](https://github.com/kubernetes/ingress-nginx/tree/main/docs/examples/customization/custom-headers)
 
 ## allow-backend-server-header
 
 Enables the return of the header Server from the backend instead of the generic nginx string. _**default:**_ is disabled
+
+## allow-snippet-annotations
+
+Enables Ingress to parse and add *-snippet annotations/directives created by the user. _**default:**_ `true`
+
+Warning: We recommend enabling this option only if you TRUST users with permission to create Ingress objects, as this
+may allow a user to add restricted configurations to the final nginx.conf file
+
+## annotation-value-word-blocklist
+
+Contains a comma-separated value of chars/words that are well known of being used to abuse Ingress configuration
+and must be blocked. Related to [CVE-2021-25742](https://github.com/kubernetes/ingress-nginx/issues/7837)
+
+When an annotation is detected with a value that matches one of the blocked bad words, the whole Ingress won't be configured.
+
+_**default:**_ `""`
+
+When doing this, the default blocklist is override, which means that the Ingress admin should add all the words
+that should be blocked, here is a suggested block list.
+
+_**suggested:**_ `"load_module,lua_package,_by_lua,location,root,proxy_pass,serviceaccount,{,},',\""`
 
 ## hide-headers
 
@@ -215,14 +248,14 @@ Sets additional header that will not be passed from the upstream server to the c
 _**default:**_ empty
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_hide_header](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_hide_header)
+[https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_hide_header](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_hide_header)
 
 ## access-log-params
 
 Additional params for access_log. For example, buffer=16k, gzip, flush=1m
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_log_module.html#access_log](http://nginx.org/en/docs/http/ngx_http_log_module.html#access_log)
+[https://nginx.org/en/docs/http/ngx_http_log_module.html#access_log](https://nginx.org/en/docs/http/ngx_http_log_module.html#access_log)
 
 ## access-log-path
 
@@ -255,7 +288,7 @@ Error log path. Goes to `/var/log/nginx/error.log` by default.
 __Note:__ the file `/var/log/nginx/error.log` is a symlink to `/dev/stderr`
 
 _References:_
-[http://nginx.org/en/docs/ngx_core_module.html#error_log](http://nginx.org/en/docs/ngx_core_module.html#error_log)
+[https://nginx.org/en/docs/ngx_core_module.html#error_log](https://nginx.org/en/docs/ngx_core_module.html#error_log)
 
 ## enable-modsecurity
 
@@ -274,35 +307,35 @@ Adds custom rules to modsecurity section of nginx configuration
 Allows to configure a custom buffer size for reading client request header.
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_core_module.html#client_header_buffer_size](http://nginx.org/en/docs/http/ngx_http_core_module.html#client_header_buffer_size)
+[https://nginx.org/en/docs/http/ngx_http_core_module.html#client_header_buffer_size](https://nginx.org/en/docs/http/ngx_http_core_module.html#client_header_buffer_size)
 
 ## client-header-timeout
 
 Defines a timeout for reading client request header, in seconds.
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_core_module.html#client_header_timeout](http://nginx.org/en/docs/http/ngx_http_core_module.html#client_header_timeout)
+[https://nginx.org/en/docs/http/ngx_http_core_module.html#client_header_timeout](https://nginx.org/en/docs/http/ngx_http_core_module.html#client_header_timeout)
 
 ## client-body-buffer-size
 
 Sets buffer size for reading client request body.
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_core_module.html#client_body_buffer_size](http://nginx.org/en/docs/http/ngx_http_core_module.html#client_body_buffer_size)
+[https://nginx.org/en/docs/http/ngx_http_core_module.html#client_body_buffer_size](https://nginx.org/en/docs/http/ngx_http_core_module.html#client_body_buffer_size)
 
 ## client-body-timeout
 
 Defines a timeout for reading client request body, in seconds.
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_core_module.html#client_body_timeout](http://nginx.org/en/docs/http/ngx_http_core_module.html#client_body_timeout)
+[https://nginx.org/en/docs/http/ngx_http_core_module.html#client_body_timeout](https://nginx.org/en/docs/http/ngx_http_core_module.html#client_body_timeout)
 
 ## disable-access-log
 
-Disables the Access Log from the entire Ingress Controller. _**default:**_ '"false"'
+Disables the Access Log from the entire Ingress Controller. _**default:**_ `false`
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_log_module.html#access_log](http://nginx.org/en/docs/http/ngx_http_log_module.html#access_log)
+[https://nginx.org/en/docs/http/ngx_http_log_module.html#access_log](https://nginx.org/en/docs/http/ngx_http_log_module.html#access_log)
 
 ## disable-ipv6
 
@@ -335,9 +368,12 @@ Since 1.9.13 NGINX will not retry non-idempotent requests (POST, LOCK, PATCH) in
 Configures the logging level of errors. Log levels above are listed in the order of increasing severity.
 
 _References:_
-[http://nginx.org/en/docs/ngx_core_module.html#error_log](http://nginx.org/en/docs/ngx_core_module.html#error_log)
+[https://nginx.org/en/docs/ngx_core_module.html#error_log](https://nginx.org/en/docs/ngx_core_module.html#error_log)
 
 ## http2-max-field-size
+
+!!! warning
+    This feature was deprecated in 1.1.3 and will be removed in 1.3.0. Use [large-client-header-buffers](#large-client-header-buffers) instead.
 
 Limits the maximum size of an HPACK-compressed request header field.
 
@@ -346,6 +382,9 @@ _References:_
 
 ## http2-max-header-size
 
+!!! warning
+    This feature was deprecated in 1.1.3 and will be removed in 1.3.0. Use [large-client-header-buffers](#large-client-header-buffers) instead.
+
 Limits the maximum size of the entire request header list after HPACK decompression.
 
 _References:_
@@ -353,17 +392,20 @@ _References:_
 
 ## http2-max-requests
 
+!!! warning
+    This feature was deprecated in 1.1.3 and will be removed in 1.3.0. Use [upstream-keepalive-requests](#upstream-keepalive-requests) instead.
+
 Sets the maximum number of requests (including push requests) that can be served through one HTTP/2 connection, after which the next client request will lead to connection closing and the need of establishing a new connection.
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_v2_module.html#http2_max_requests](http://nginx.org/en/docs/http/ngx_http_v2_module.html#http2_max_requests)
+[https://nginx.org/en/docs/http/ngx_http_v2_module.html#http2_max_requests](https://nginx.org/en/docs/http/ngx_http_v2_module.html#http2_max_requests)
 
 ## http2-max-concurrent-streams
 
 Sets the maximum number of concurrent HTTP/2 streams in a connection.
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_v2_module.html#http2_max_concurrent_streams](http://nginx.org/en/docs/http/ngx_http_v2_module.html#http2_max_concurrent_streams)
+[https://nginx.org/en/docs/http/ngx_http_v2_module.html#http2_max_concurrent_streams](https://nginx.org/en/docs/http/ngx_http_v2_module.html#http2_max_concurrent_streams)
 
 ## hsts
 
@@ -385,36 +427,54 @@ Sets the time, in seconds, that the browser should remember that this site is on
 
 ## hsts-preload
 
-Enables or disables the preload attribute in the HSTS feature (when it is enabled) dd
+Enables or disables the preload attribute in the HSTS feature (when it is enabled).
 
 ## keep-alive
 
 Sets the time during which a keep-alive client connection will stay open on the server side. The zero value disables keep-alive client connections.
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_core_module.html#keepalive_timeout](http://nginx.org/en/docs/http/ngx_http_core_module.html#keepalive_timeout)
+[https://nginx.org/en/docs/http/ngx_http_core_module.html#keepalive_timeout](https://nginx.org/en/docs/http/ngx_http_core_module.html#keepalive_timeout)
+
+!!! important
+    Setting `keep-alive: '0'` will most likely break concurrent http/2 requests due to changes introduced with nginx 1.19.7
+
+```
+Changes with nginx 1.19.7                                        16 Feb 2021
+
+    *) Change: connections handling in HTTP/2 has been changed to better
+       match HTTP/1.x; the "http2_recv_timeout", "http2_idle_timeout", and
+       "http2_max_requests" directives have been removed, the
+       "keepalive_timeout" and "keepalive_requests" directives should be
+       used instead.
+```
+
+_References:_
+[nginx change log](https://nginx.org/en/CHANGES)
+[nginx issue tracker](https://trac.nginx.org/nginx/ticket/2155)
+[nginx mailing list](https://mailman.nginx.org/pipermail/nginx/2021-May/060697.html)
 
 ## keep-alive-requests
 
 Sets the maximum number of requests that can be served through one keep-alive connection.
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_core_module.html#keepalive_requests](http://nginx.org/en/docs/http/ngx_http_core_module.html#keepalive_requests)
+[https://nginx.org/en/docs/http/ngx_http_core_module.html#keepalive_requests](https://nginx.org/en/docs/http/ngx_http_core_module.html#keepalive_requests)
 
 ## large-client-header-buffers
 
 Sets the maximum number and size of buffers used for reading large client request header. _**default:**_ 4 8k
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_core_module.html#large_client_header_buffers](http://nginx.org/en/docs/http/ngx_http_core_module.html#large_client_header_buffers)
+[https://nginx.org/en/docs/http/ngx_http_core_module.html#large_client_header_buffers](https://nginx.org/en/docs/http/ngx_http_core_module.html#large_client_header_buffers)
 
 ## log-format-escape-json
 
-Sets if the escape parameter allows JSON ("true") or default characters escaping in variables ("false") Sets the nginx [log format](http://nginx.org/en/docs/http/ngx_http_log_module.html#log_format).
+Sets if the escape parameter allows JSON ("true") or default characters escaping in variables ("false") Sets the nginx [log format](https://nginx.org/en/docs/http/ngx_http_log_module.html#log_format).
 
 ## log-format-upstream
 
-Sets the nginx [log format](http://nginx.org/en/docs/http/ngx_http_log_module.html#log_format).
+Sets the nginx [log format](https://nginx.org/en/docs/http/ngx_http_log_module.html#log_format).
 Example for json output:
 
 ```json
@@ -437,11 +497,11 @@ If disabled, a worker process will accept one new connection at a time. Otherwis
 _**default:**_ true
 
 _References:_
-[http://nginx.org/en/docs/ngx_core_module.html#multi_accept](http://nginx.org/en/docs/ngx_core_module.html#multi_accept)
+[https://nginx.org/en/docs/ngx_core_module.html#multi_accept](https://nginx.org/en/docs/ngx_core_module.html#multi_accept)
 
 ## max-worker-connections
 
-Sets the [maximum number of simultaneous connections](http://nginx.org/en/docs/ngx_core_module.html#worker_connections) that can be opened by each worker process.
+Sets the [maximum number of simultaneous connections](https://nginx.org/en/docs/ngx_core_module.html#worker_connections) that can be opened by each worker process.
 0 will use the value of [max-worker-open-files](#max-worker-open-files).
 _**default:**_ 16384
 
@@ -450,13 +510,13 @@ _**default:**_ 16384
 
 ## max-worker-open-files
 
-Sets the [maximum number of files](http://nginx.org/en/docs/ngx_core_module.html#worker_rlimit_nofile) that can be opened by each worker process.
-The default of 0 means "max open files (system's limit) / [worker-processes](#worker-processes) - 1024".
+Sets the [maximum number of files](https://nginx.org/en/docs/ngx_core_module.html#worker_rlimit_nofile) that can be opened by each worker process.
+The default of 0 means "max open files (system's limit) - 1024".
 _**default:**_ 0
 
 ## map-hash-bucket-size
 
-Sets the bucket size for the [map variables hash tables](http://nginx.org/en/docs/http/ngx_http_map_module.html#map_hash_bucket_size). The details of setting up hash tables are provided in a separate [document](http://nginx.org/en/docs/hash.html).
+Sets the bucket size for the [map variables hash tables](https://nginx.org/en/docs/http/ngx_http_map_module.html#map_hash_bucket_size). The details of setting up hash tables are provided in a separate [document](https://nginx.org/en/docs/hash.html).
 
 ## proxy-real-ip-cidr
 
@@ -465,14 +525,14 @@ _**default:**_ "0.0.0.0/0"
 
 ## proxy-set-headers
 
-Sets custom headers from named configmap before sending traffic to backends. The value format is namespace/name.  See [example](https://github.com/kubernetes/ingress-nginx/tree/master/docs/examples/customization/custom-headers)
+Sets custom headers from named configmap before sending traffic to backends. The value format is namespace/name.  See [example](https://kubernetes.github.io/ingress-nginx/examples/customization/custom-headers/)
 
 ## server-name-hash-max-size
 
-Sets the maximum size of the [server names hash tables](http://nginx.org/en/docs/http/ngx_http_core_module.html#server_names_hash_max_size) used in server names,map directive’s values, MIME types, names of request header strings, etc.
+Sets the maximum size of the [server names hash tables](https://nginx.org/en/docs/http/ngx_http_core_module.html#server_names_hash_max_size) used in server names,map directive’s values, MIME types, names of request header strings, etc.
 
 _References:_
-[http://nginx.org/en/docs/hash.html](http://nginx.org/en/docs/hash.html)
+[https://nginx.org/en/docs/hash.html](https://nginx.org/en/docs/hash.html)
 
 ## server-name-hash-bucket-size
 
@@ -480,8 +540,8 @@ Sets the size of the bucket for the server names hash tables.
 
 _References:_
 
-- [http://nginx.org/en/docs/hash.html](http://nginx.org/en/docs/hash.html)
-- [http://nginx.org/en/docs/http/ngx_http_core_module.html#server_names_hash_bucket_size](http://nginx.org/en/docs/http/ngx_http_core_module.html#server_names_hash_bucket_size)
+- [https://nginx.org/en/docs/hash.html](https://nginx.org/en/docs/hash.html)
+- [https://nginx.org/en/docs/http/ngx_http_core_module.html#server_names_hash_bucket_size](https://nginx.org/en/docs/http/ngx_http_core_module.html#server_names_hash_bucket_size)
 
 ## proxy-headers-hash-max-size
 
@@ -489,7 +549,7 @@ Sets the maximum size of the proxy headers hash tables.
 
 _References:_
 
-- [http://nginx.org/en/docs/hash.html](http://nginx.org/en/docs/hash.html)
+- [https://nginx.org/en/docs/hash.html](https://nginx.org/en/docs/hash.html)
 - [https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_headers_hash_max_size](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_headers_hash_max_size)
 
 ## reuse-port
@@ -503,12 +563,12 @@ Sets the size of the bucket for the proxy headers hash tables.
 
 _References:_
 
-- [http://nginx.org/en/docs/hash.html](http://nginx.org/en/docs/hash.html)
+- [https://nginx.org/en/docs/hash.html](https://nginx.org/en/docs/hash.html)
 - [https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_headers_hash_bucket_size](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_headers_hash_bucket_size)
 
 ## plugins
 
-Activates plugins installed in `/etc/nginx/lua/plugins`. Refer to [ingress-nginx plugins README](https://github.com/kubernetes/ingress-nginx/blob/master/rootfs/etc/nginx/lua/plugins/README.md) for more information on how to write and install a plugin.
+Activates plugins installed in `/etc/nginx/lua/plugins`. Refer to [ingress-nginx plugins README](https://github.com/kubernetes/ingress-nginx/blob/main/rootfs/etc/nginx/lua/plugins/README.md) for more information on how to write and install a plugin.
 
 ## server-tokens
 
@@ -516,14 +576,14 @@ Send NGINX Server header in responses and display NGINX version in error pages. 
 
 ## ssl-ciphers
 
-Sets the [ciphers](http://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_ciphers) list to enable. The ciphers are specified in the format understood by the OpenSSL library.
+Sets the [ciphers](https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_ciphers) list to enable. The ciphers are specified in the format understood by the OpenSSL library.
 
 The default cipher list is:
  `ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384`.
 
 The ordering of a ciphersuite is very important because it decides which algorithms are going to be selected in priority. The recommendation above prioritizes algorithms that provide perfect [forward secrecy](https://wiki.mozilla.org/Security/Server_Side_TLS#Forward_Secrecy).
 
-DHE-based cyphers will not be available until DH parameter is configured [Custom DH parameters for perfect forward secrecy](https://github.com/kubernetes/ingress-nginx/tree/master/docs/examples/customization/ssl-dh-param)
+DHE-based cyphers will not be available until DH parameter is configured [Custom DH parameters for perfect forward secrecy](https://github.com/kubernetes/ingress-nginx/tree/main/docs/examples/customization/ssl-dh-param)
 
 Please check the [Mozilla SSL Configuration Generator](https://mozilla.github.io/server-side-tls/ssl-config-generator/).
 
@@ -534,7 +594,7 @@ __Note:__ ssl_prefer_server_ciphers directive will be enabled by default for htt
 Specifies a curve for ECDHE ciphers.
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_ecdh_curve](http://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_ecdh_curve)
+[https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_ecdh_curve](https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_ecdh_curve)
 
 ## ssl-dh-param
 
@@ -544,11 +604,11 @@ _References:_
 
 - [https://wiki.openssl.org/index.php/Diffie-Hellman_parameters](https://wiki.openssl.org/index.php/Diffie-Hellman_parameters)
 - [https://wiki.mozilla.org/Security/Server_Side_TLS#DHE_handshake_and_dhparam](https://wiki.mozilla.org/Security/Server_Side_TLS#DHE_handshake_and_dhparam)
-- [http://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_dhparam](http://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_dhparam)
+- [https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_dhparam](https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_dhparam)
 
 ## ssl-protocols
 
-Sets the [SSL protocols](http://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_protocols) to use. The default is: `TLSv1.2 TLSv1.3`.
+Sets the [SSL protocols](https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_protocols) to use. The default is: `TLSv1.2 TLSv1.3`.
 
 Please check the result of the configuration using `https://ssllabs.com/ssltest/analyze.html` or `https://testssl.sh`.
 
@@ -560,34 +620,34 @@ Time Resumption (0-RTT).
 This requires `ssl-protocols` to have `TLSv1.3` enabled. Enable this with caution, because requests sent within early
 data are subject to [replay attacks](https://tools.ietf.org/html/rfc8470).
 
-[ssl_early_data](http://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_early_data). The default is: `false`.
+[ssl_early_data](https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_early_data). The default is: `false`.
 
 ## ssl-session-cache
 
-Enables or disables the use of shared [SSL cache](http://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_session_cache) among worker processes.
+Enables or disables the use of shared [SSL cache](https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_session_cache) among worker processes.
 
 ## ssl-session-cache-size
 
-Sets the size of the [SSL shared session cache](http://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_session_cache) between all worker processes.
+Sets the size of the [SSL shared session cache](https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_session_cache) between all worker processes.
 
 ## ssl-session-tickets
 
-Enables or disables session resumption through [TLS session tickets](http://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_session_tickets).
+Enables or disables session resumption through [TLS session tickets](https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_session_tickets).
 
 ## ssl-session-ticket-key
 
 Sets the secret key used to encrypt and decrypt TLS session tickets. The value must be a valid base64 string.
 To create a ticket: `openssl rand 80 | openssl enc -A -base64`
 
-[TLS session ticket-key](http://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_session_tickets), by default, a randomly generated key is used.
+[TLS session ticket-key](https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_session_tickets), by default, a randomly generated key is used.
 
 ## ssl-session-timeout
 
-Sets the time during which a client may [reuse the session](http://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_session_timeout) parameters stored in a cache.
+Sets the time during which a client may [reuse the session](https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_session_timeout) parameters stored in a cache.
 
 ## ssl-buffer-size
 
-Sets the size of the [SSL buffer](http://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_buffer_size) used for sending data. The default of 4k helps NGINX to improve TLS Time To First Byte (TTTFB).
+Sets the size of the [SSL buffer](https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_buffer_size) used for sending data. The default of 4k helps NGINX to improve TLS Time To First Byte (TTTFB).
 
 _References:_
 [https://www.igvita.com/2013/12/16/optimizing-nginx-tls-time-to-first-byte/](https://www.igvita.com/2013/12/16/optimizing-nginx-tls-time-to-first-byte/)
@@ -603,11 +663,11 @@ _**default:**_ 5s
 
 ## use-gzip
 
-Enables or disables compression of HTTP responses using the ["gzip" module](http://nginx.org/en/docs/http/ngx_http_gzip_module.html). MIME types to compress are controlled by [gzip-types](#gzip-types). _**default:**_ false
+Enables or disables compression of HTTP responses using the ["gzip" module](https://nginx.org/en/docs/http/ngx_http_gzip_module.html). MIME types to compress are controlled by [gzip-types](#gzip-types). _**default:**_ false
 
 ## use-geoip
 
-Enables or disables ["geoip" module](http://nginx.org/en/docs/http/ngx_http_geoip_module.html) that creates variables with values depending on the client IP address, using the precompiled MaxMind databases.
+Enables or disables ["geoip" module](https://nginx.org/en/docs/http/ngx_http_geoip_module.html) that creates variables with values depending on the client IP address, using the precompiled MaxMind databases.
 _**default:**_ true
 
 > __Note:__ MaxMind legacy databases are discontinued and will not receive updates after 2019-01-02, cf. [discontinuation notice](https://support.maxmind.com/geolite-legacy-discontinuation-notice/). Consider [use-geoip2](#use-geoip2) below.
@@ -635,6 +695,10 @@ The default mime type list to compress is: `application/xml+rss application/atom
 
 Sets the Brotli Compression Level that will be used. _**default:**_ 4
 
+## brotli-min-length
+
+Minimum length of responses, in bytes, that will be eligible for brotli compression. _**default:**_ 20
+
 ## brotli-types
 
 Sets the MIME Types that will be compressed on-the-fly by brotli.
@@ -642,7 +706,7 @@ _**default:**_ `application/xml+rss application/atom+xml application/javascript 
 
 ## use-http2
 
-Enables or disables [HTTP/2](http://nginx.org/en/docs/http/ngx_http_v2_module.html) support in secure connections.
+Enables or disables [HTTP/2](https://nginx.org/en/docs/http/ngx_http_v2_module.html) support in secure connections.
 
 ## gzip-level
 
@@ -659,12 +723,12 @@ _**default:**_ `application/atom+xml application/javascript application/x-javasc
 
 ## worker-processes
 
-Sets the number of [worker processes](http://nginx.org/en/docs/ngx_core_module.html#worker_processes).
+Sets the number of [worker processes](https://nginx.org/en/docs/ngx_core_module.html#worker_processes).
 The default of "auto" means number of available CPU cores.
 
 ## worker-cpu-affinity
 
-Binds worker processes to the sets of CPUs. [worker_cpu_affinity](http://nginx.org/en/docs/ngx_core_module.html#worker_cpu_affinity).
+Binds worker processes to the sets of CPUs. [worker_cpu_affinity](https://nginx.org/en/docs/ngx_core_module.html#worker_cpu_affinity).
 By default worker processes are not bound to any specific CPUs. The value can be:
 
 - "": empty string indicate no affinity is applied.
@@ -673,7 +737,7 @@ By default worker processes are not bound to any specific CPUs. The value can be
 
 ## worker-shutdown-timeout
 
-Sets a timeout for Nginx to [wait for worker to gracefully shutdown](http://nginx.org/en/docs/ngx_core_module.html#worker_shutdown_timeout). _**default:**_ "240s"
+Sets a timeout for Nginx to [wait for worker to gracefully shutdown](https://nginx.org/en/docs/ngx_core_module.html#worker_shutdown_timeout). _**default:**_ "240s"
 
 ## load-balance
 
@@ -681,7 +745,7 @@ Sets the algorithm to use for load balancing.
 The value can either be:
 
 - round_robin: to use the default round robin loadbalancer
-- ewma: to use the Peak EWMA method for routing ([implementation](https://github.com/kubernetes/ingress-nginx/blob/master/rootfs/etc/nginx/lua/balancer/ewma.lua))
+- ewma: to use the Peak EWMA method for routing ([implementation](https://github.com/kubernetes/ingress-nginx/blob/main/rootfs/etc/nginx/lua/balancer/ewma.lua))
 
 The default is `round_robin`.
 
@@ -689,21 +753,21 @@ The default is `round_robin`.
 - To load balance using session cookies, consider the `nginx.ingress.kubernetes.io/affinity` annotation.
 
 _References:_
-[http://nginx.org/en/docs/http/load_balancing.html](http://nginx.org/en/docs/http/load_balancing.html)
+[https://nginx.org/en/docs/http/load_balancing.html](https://nginx.org/en/docs/http/load_balancing.html)
 
 ## variables-hash-bucket-size
 
 Sets the bucket size for the variables hash table.
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_map_module.html#variables_hash_bucket_size](http://nginx.org/en/docs/http/ngx_http_map_module.html#variables_hash_bucket_size)
+[https://nginx.org/en/docs/http/ngx_http_map_module.html#variables_hash_bucket_size](https://nginx.org/en/docs/http/ngx_http_map_module.html#variables_hash_bucket_size)
 
 ## variables-hash-max-size
 
 Sets the maximum size of the variables hash table.
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_map_module.html#variables_hash_max_size](http://nginx.org/en/docs/http/ngx_http_map_module.html#variables_hash_max_size)
+[https://nginx.org/en/docs/http/ngx_http_map_module.html#variables_hash_max_size](https://nginx.org/en/docs/http/ngx_http_map_module.html#variables_hash_max_size)
 
 ## upstream-keepalive-connections
 
@@ -713,8 +777,16 @@ exceeded, the least recently used connections are closed.
 _**default:**_ 320
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive](http://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive)
+[https://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive)
 
+
+## upstream-keepalive-time
+
+Sets the maximum time during which requests can be processed through one keepalive connection.
+ _**default:**_ "1h"
+
+_References:_
+[http://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive_time](http://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive_time)
 
 ## upstream-keepalive-timeout
 
@@ -722,7 +794,7 @@ Sets a timeout during which an idle keepalive connection to an upstream server w
  _**default:**_ 60
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive_timeout](http://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive_timeout)
+[https://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive_timeout](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive_timeout)
 
 
 ## upstream-keepalive-requests
@@ -733,47 +805,47 @@ _**default:**_ 10000
 
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive_requests](http://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive_requests)
+[https://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive_requests](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive_requests)
 
 
 ## limit-conn-zone-variable
 
-Sets parameters for a shared memory zone that will keep states for various keys of [limit_conn_zone](http://nginx.org/en/docs/http/ngx_http_limit_conn_module.html#limit_conn_zone). The default of "$binary_remote_addr" variable’s size is always 4 bytes for IPv4 addresses or 16 bytes for IPv6 addresses.
+Sets parameters for a shared memory zone that will keep states for various keys of [limit_conn_zone](https://nginx.org/en/docs/http/ngx_http_limit_conn_module.html#limit_conn_zone). The default of "$binary_remote_addr" variable’s size is always 4 bytes for IPv4 addresses or 16 bytes for IPv6 addresses.
 
 ## proxy-stream-timeout
 
 Sets the timeout between two successive read or write operations on client or proxied server connections. If no data is transmitted within this time, the connection is closed.
 
 _References:_
-[http://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_timeout](http://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_timeout)
+[https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_timeout](https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_timeout)
 
 ## proxy-stream-next-upstream
 
 When a connection to the proxied server cannot be established, determines whether a client connection will be passed to the next server.
 
 _References:_
-[http://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_next_upstream](http://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_next_upstream)
+[https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_next_upstream](https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_next_upstream)
 
 ## proxy-stream-next-upstream-timeout
 
 Limits the time allowed to pass a connection to the next server. The 0 value turns off this limitation.
 
 _References:_
-[http://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_next_upstream_timeout](http://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_next_upstream_timeout)
+[https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_next_upstream_timeout](https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_next_upstream_timeout)
 
 ## proxy-stream-next-upstream-tries
 
 Limits the number of possible tries a request should be passed to the next server. The 0 value turns off this limitation.
 
 _References:_
-[http://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_next_upstream_tries](http://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_next_upstream_timeout)
+[https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_next_upstream_tries](https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_next_upstream_timeout)
 
 ## proxy-stream-responses
 
 Sets the number of datagrams expected from the proxied server in response to the client request if the UDP protocol is used.
 
 _References:_
-[http://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_responses](http://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_responses)
+[https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_responses](https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_responses)
 
 ## bind-address
 
@@ -787,7 +859,7 @@ If false, NGINX ignores incoming `X-Forwarded-*` headers, filling them with the 
 
 ## enable-real-ip
 
-`enable-real-ip` enables the configuration of [http://nginx.org/en/docs/http/ngx_http_realip_module.html](http://nginx.org/en/docs/http/ngx_http_realip_module.html). Specific attributes of the module can be configured further by using `forwarded-for-header` and `proxy-real-ip-cidr` settings.
+`enable-real-ip` enables the configuration of [https://nginx.org/en/docs/http/ngx_http_realip_module.html](https://nginx.org/en/docs/http/ngx_http_realip_module.html). Specific attributes of the module can be configured further by using `forwarded-for-header` and `proxy-real-ip-cidr` settings.
 
 ## forwarded-for-header
 
@@ -912,7 +984,7 @@ Specifies the environment this trace belongs to. _**default:**_ prod
 
 ## datadog-operation-name-override
 
-Overrides the operation naem to use for any traces crated. _**default:**_ nginx.handle
+Overrides the operation name to use for any traces crated. _**default:**_ nginx.handle
 
 ## datadog-priority-sampling
 
@@ -936,6 +1008,10 @@ Adds custom configuration to the http section of the nginx configuration.
 
 Adds custom configuration to all the servers in the nginx configuration.
 
+## stream-snippet
+
+Adds custom configuration to the stream section of the nginx configuration.
+
 ## location-snippet
 
 Adds custom configuration to all the locations in the nginx configuration.
@@ -944,77 +1020,81 @@ You can not use this to add new locations that proxy to the Kubernetes pods, as 
 
 ## custom-http-errors
 
-Enables which HTTP codes should be passed for processing with the [error_page directive](http://nginx.org/en/docs/http/ngx_http_core_module.html#error_page)
+Enables which HTTP codes should be passed for processing with the [error_page directive](https://nginx.org/en/docs/http/ngx_http_core_module.html#error_page)
 
-Setting at least one code also enables [proxy_intercept_errors](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_intercept_errors) which are required to process error_page.
+Setting at least one code also enables [proxy_intercept_errors](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_intercept_errors) which are required to process error_page.
 
 Example usage: `custom-http-errors: 404,415`
 
 ## proxy-body-size
 
 Sets the maximum allowed size of the client request body.
-See NGINX [client_max_body_size](http://nginx.org/en/docs/http/ngx_http_core_module.html#client_max_body_size).
+See NGINX [client_max_body_size](https://nginx.org/en/docs/http/ngx_http_core_module.html#client_max_body_size).
 
 ## proxy-connect-timeout
 
-Sets the timeout for [establishing a connection with a proxied server](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_connect_timeout). It should be noted that this timeout cannot usually exceed 75 seconds.
+Sets the timeout for [establishing a connection with a proxied server](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_connect_timeout). It should be noted that this timeout cannot usually exceed 75 seconds.
 
 ## proxy-read-timeout
 
-Sets the timeout in seconds for [reading a response from the proxied server](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_read_timeout). The timeout is set only between two successive read operations, not for the transmission of the whole response.
+Sets the timeout in seconds for [reading a response from the proxied server](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_read_timeout). The timeout is set only between two successive read operations, not for the transmission of the whole response.
 
 ## proxy-send-timeout
 
-Sets the timeout in seconds for [transmitting a request to the proxied server](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_send_timeout). The timeout is set only between two successive write operations, not for the transmission of the whole request.
+Sets the timeout in seconds for [transmitting a request to the proxied server](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_send_timeout). The timeout is set only between two successive write operations, not for the transmission of the whole request.
 
 ## proxy-buffers-number
 
-Sets the number of the buffer used for [reading the first part of the response](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffers) received from the proxied server. This part usually contains a small response header.
+Sets the number of the buffer used for [reading the first part of the response](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffers) received from the proxied server. This part usually contains a small response header.
 
 ## proxy-buffer-size
 
-Sets the size of the buffer used for [reading the first part of the response](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffer_size) received from the proxied server. This part usually contains a small response header.
+Sets the size of the buffer used for [reading the first part of the response](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffer_size) received from the proxied server. This part usually contains a small response header.
 
 ## proxy-cookie-path
 
-Sets a text that [should be changed in the path attribute](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_cookie_path) of the “Set-Cookie” header fields of a proxied server response.
+Sets a text that [should be changed in the path attribute](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_cookie_path) of the “Set-Cookie” header fields of a proxied server response.
 
 ## proxy-cookie-domain
 
-Sets a text that [should be changed in the domain attribute](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_cookie_domain) of the “Set-Cookie” header fields of a proxied server response.
+Sets a text that [should be changed in the domain attribute](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_cookie_domain) of the “Set-Cookie” header fields of a proxied server response.
 
 ## proxy-next-upstream
 
-Specifies in [which cases](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream) a request should be passed to the next server.
+Specifies in [which cases](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream) a request should be passed to the next server.
 
 ## proxy-next-upstream-timeout
 
-[Limits the time](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream_timeout) in seconds during which a request can be passed to the next server.
+[Limits the time](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream_timeout) in seconds during which a request can be passed to the next server.
 
 ## proxy-next-upstream-tries
 
-Limit the number of [possible tries](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream_tries) a request should be passed to the next server.
+Limit the number of [possible tries](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream_tries) a request should be passed to the next server.
 
 ## proxy-redirect-from
 
 Sets the original text that should be changed in the "Location" and "Refresh" header fields of a proxied server response. _**default:**_ off
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_redirect](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_redirect)
+[https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_redirect](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_redirect)
 
 ## proxy-request-buffering
 
-Enables or disables [buffering of a client request body](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_request_buffering).
+Enables or disables [buffering of a client request body](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_request_buffering).
 
 ## ssl-redirect
 
 Sets the global value of redirects (301) to HTTPS if the server has a TLS certificate (defined in an Ingress rule).
 _**default:**_ "true"
 
+## force-ssl-redirect
+Sets the global value of redirects (308) to HTTPS if the server has a default TLS certificate (defined in extra-args).
+_**default:**_ "false"
+
 ## whitelist-source-range
 
 Sets the default whitelisted IPs for each `server` block. This can be overwritten by an annotation on an Ingress rule.
-See [ngx_http_access_module](http://nginx.org/en/docs/http/ngx_http_access_module.html).
+See [ngx_http_access_module](https://nginx.org/en/docs/http/ngx_http_access_module.html).
 
 ## skip-access-log-urls
 
@@ -1025,7 +1105,7 @@ Sets a list of URLs that should not appear in the NGINX access log. This is usef
 Limits the rate of response transmission to a client. The rate is specified in bytes per second. The zero value disables rate limiting. The limit is set per a request, and so if a client simultaneously opens two connections, the overall rate will be twice as much as the specified limit.
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_core_module.html#limit_rate](http://nginx.org/en/docs/http/ngx_http_core_module.html#limit_rate)
+[https://nginx.org/en/docs/http/ngx_http_core_module.html#limit_rate](https://nginx.org/en/docs/http/ngx_http_core_module.html#limit_rate)
 
 ## limit-rate-after
 
@@ -1046,8 +1126,14 @@ For example following will set default `certificate_data` dictionary to `100M` a
 lua-shared-dicts: "certificate_data: 100, my_custom_plugin: 5"
 ```
 
+You can optionally set a size unit to allow for kilobyte-granularity. Allowed units are 'm' or 'k' (case-insensitive), and it defaults to MB if no unit is provided. Here is a similar example, but the `my_custom_plugin` dict is only 512KB.
+
+```
+lua-shared-dicts: "certificate_data: 100, my_custom_plugin: 512k"
+```
+
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_core_module.html#limit_rate_after](http://nginx.org/en/docs/http/ngx_http_core_module.html#limit_rate_after)
+[https://nginx.org/en/docs/http/ngx_http_core_module.html#limit_rate_after](https://nginx.org/en/docs/http/ngx_http_core_module.html#limit_rate_after)
 
 ## http-redirect-code
 
@@ -1061,15 +1147,27 @@ _**default:**_ 308
 
 ## proxy-buffering
 
-Enables or disables [buffering of responses from the proxied server](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffering).
+Enables or disables [buffering of responses from the proxied server](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffering).
 
 ## limit-req-status-code
 
-Sets the [status code to return in response to rejected requests](http://nginx.org/en/docs/http/ngx_http_limit_req_module.html#limit_req_status). _**default:**_ 503
+Sets the [status code to return in response to rejected requests](https://nginx.org/en/docs/http/ngx_http_limit_req_module.html#limit_req_status). _**default:**_ 503
 
 ## limit-conn-status-code
 
-Sets the [status code to return in response to rejected connections](http://nginx.org/en/docs/http/ngx_http_limit_conn_module.html#limit_conn_status). _**default:**_ 503
+Sets the [status code to return in response to rejected connections](https://nginx.org/en/docs/http/ngx_http_limit_conn_module.html#limit_conn_status). _**default:**_ 503
+
+## enable-syslog
+
+Enable [syslog](https://nginx.org/en/docs/syslog.html) feature for access log and error log. _**default:**_ false
+
+## syslog-host
+
+Sets the address of syslog server. The address can be specified as a domain name or IP address.
+
+## syslog-port
+
+Sets the port of syslog server. _**default:**_ 514
 
 ## no-tls-redirect-locations
 
@@ -1083,7 +1181,7 @@ Similar to the Ingress rule annotation `nginx.ingress.kubernetes.io/auth-url`.
 Locations that should not get authenticated can be listed using `no-auth-locations` See [no-auth-locations](#no-auth-locations). In addition, each service can be excluded from authentication via annotation `enable-global-auth` set to "false".
 _**default:**_ ""
 
-_References:_ [https://github.com/kubernetes/ingress-nginx/blob/master/docs/user-guide/nginx-configuration/annotations.md#external-authentication](https://github.com/kubernetes/ingress-nginx/blob/master/docs/user-guide/nginx-configuration/annotations.md#external-authentication)
+_References:_ [https://github.com/kubernetes/ingress-nginx/blob/main/docs/user-guide/nginx-configuration/annotations.md#external-authentication](https://github.com/kubernetes/ingress-nginx/blob/main/docs/user-guide/nginx-configuration/annotations.md#external-authentication)
 
 ## global-auth-method
 
@@ -1127,7 +1225,12 @@ Enables caching for global auth requests. Specify a lookup key for auth response
 
 ## global-auth-cache-duration
 
-Set a caching time for auth responses based on their response codes, e.g. `200 202 30m`. See [proxy_cache_valid](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_cache_valid) for details. You may specify multiple, comma-separated values: `200 202 10m, 401 5m`. defaults to `200 202 401 5m`.
+Set a caching time for auth responses based on their response codes, e.g. `200 202 30m`. See [proxy_cache_valid](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_cache_valid) for details. You may specify multiple, comma-separated values: `200 202 10m, 401 5m`. defaults to `200 202 401 5m`.
+
+## global-auth-always-set-cookie
+
+Always set a cookie returned by auth request. By default, the cookie will be set only if an upstream reports with the code 200, 201, 204, 206, 301, 302, 303, 304, 307, or 308.
+_**default:**_ false
 
 ## no-auth-locations
 
@@ -1139,7 +1242,7 @@ _**default:**_ "/.well-known/acme-challenge"
 A comma-separated list of IP addresses (or subnets), request from which have to be blocked globally.
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_access_module.html#deny](http://nginx.org/en/docs/http/ngx_http_access_module.html#deny)
+[https://nginx.org/en/docs/http/ngx_http_access_module.html#deny](https://nginx.org/en/docs/http/ngx_http_access_module.html#deny)
 
 ## block-user-agents
 
@@ -1147,7 +1250,7 @@ A comma-separated list of User-Agent, request from which have to be blocked glob
 It's possible to use here full strings and regular expressions. More details about valid patterns can be found at `map` Nginx directive documentation.
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_map_module.html#map](http://nginx.org/en/docs/http/ngx_http_map_module.html#map)
+[https://nginx.org/en/docs/http/ngx_http_map_module.html#map](https://nginx.org/en/docs/http/ngx_http_map_module.html#map)
 
 ## block-referers
 
@@ -1155,7 +1258,7 @@ A comma-separated list of Referers, request from which have to be blocked global
 It's possible to use here full strings and regular expressions. More details about valid patterns can be found at `map` Nginx directive documentation.
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_map_module.html#map](http://nginx.org/en/docs/http/ngx_http_map_module.html#map)
+[https://nginx.org/en/docs/http/ngx_http_map_module.html#map](https://nginx.org/en/docs/http/ngx_http_map_module.html#map)
 
 ## proxy-ssl-location-only
 
@@ -1168,20 +1271,40 @@ Sets the default MIME type of a response.
 _**default:**_ text/html
 
 _References:_
-[http://nginx.org/en/docs/http/ngx_http_core_module.html#default_type](http://nginx.org/en/docs/http/ngx_http_core_module.html#default_type)
+[https://nginx.org/en/docs/http/ngx_http_core_module.html#default_type](https://nginx.org/en/docs/http/ngx_http_core_module.html#default_type)
 
 ## global-rate-limit
 
 * `global-rate-limit-status-code`: configure HTTP status code to return when rejecting requests. Defaults to 429.
 
-Configure `memcached` client for [Global Rate Limiting](https://github.com/kubernetes/ingress-nginx/blob/master/docs/user-guide/nginx-configuration/annotations.md#global-rate-limiting).
+Configure `memcached` client for [Global Rate Limiting](https://github.com/kubernetes/ingress-nginx/blob/main/docs/user-guide/nginx-configuration/annotations.md#global-rate-limiting).
 
 * `global-rate-limit-memcached-host`: IP/FQDN of memcached server to use. Required to enable Global Rate Limiting.
 * `global-rate-limit-memcached-port`: port of memcached server to use. Defaults default memcached port of `11211`.
 * `global-rate-limit-memcached-connect-timeout`: configure timeout for connect, send and receive operations. Unit is millisecond. Defaults to 50ms.
-* `global-rate-limit-memcached-max-idle-timeout`: configure timeout for cleaning idle connections. Unit is millisecond. Defaults to 50ms. 
+* `global-rate-limit-memcached-max-idle-timeout`: configure timeout for cleaning idle connections. Unit is millisecond. Defaults to 50ms.
 * `global-rate-limit-memcached-pool-size`: configure number of max connections to keep alive. Make sure your `memcached` server can handle
 `global-rate-limit-memcached-pool-size * worker-processes * <number of ingress-nginx replicas>` simultaneous connections.
 
 These settings get used by [lua-resty-global-throttle](https://github.com/ElvinEfendi/lua-resty-global-throttle)
 that ingress-nginx includes. Refer to the link to learn more about `lua-resty-global-throttle`.
+
+## service-upstream
+
+Set if the service's Cluster IP and port should be used instead of a list of all endpoints. This can be overwritten by an annotation on an Ingress rule.
+_**default:**_ "false"
+
+## ssl-reject-handshake
+
+Set to reject SSL handshake to an unknown virtualhost. This parameter helps to mitigate the fingerprinting using default certificate of ingress.
+_**default:**_ "false"
+
+_References:_
+[https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_reject_handshake](https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_reject_handshake)
+
+## debug-connections
+Enables debugging log for selected client connections.
+_**default:**_ ""
+
+_References:_
+[http://nginx.org/en/docs/ngx_core_module.html#debug_connection](http://nginx.org/en/docs/ngx_core_module.html#debug_connection)

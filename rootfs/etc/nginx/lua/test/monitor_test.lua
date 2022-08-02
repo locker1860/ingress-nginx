@@ -82,6 +82,7 @@ describe("Monitor", function()
         namespace = "default",
         ingress_name = "example",
         service_name = "http-svc",
+        proxy_alternative_upstream_name = "default-http-svc-canary-80",
         location_path = "/",
 
         request_method = "GET",
@@ -92,7 +93,8 @@ describe("Monitor", function()
 
         upstream_addr = "10.10.0.1",
         upstream_connect_time = "0.01",
-        upstream_response_time = "0.02",
+        upstream_header_time = "0.02",
+        upstream_response_time = "0.03",
         upstream_response_length = "456",
         upstream_status = "200",
       }
@@ -114,6 +116,7 @@ describe("Monitor", function()
           namespace = "default",
           ingress = "example",
           service = "http-svc",
+          canary = "default-http-svc-canary-80",
           path = "/",
 
           method = "GET",
@@ -123,7 +126,8 @@ describe("Monitor", function()
           responseLength = 512,
 
           upstreamLatency = 0.01,
-          upstreamResponseTime = 0.02,
+          upstreamHeaderTime = 0.02,
+          upstreamResponseTime = 0.03,
           upstreamResponseLength = 456,
         },
         {
@@ -131,6 +135,7 @@ describe("Monitor", function()
           namespace = "default",
           ingress = "example",
           service = "http-svc",
+          canary = "default-http-svc-canary-80",
           path = "/",
 
           method = "POST",
@@ -140,12 +145,13 @@ describe("Monitor", function()
           responseLength = 512,
 
           upstreamLatency = 0.01,
-          upstreamResponseTime = 0.02,
+          upstreamHeaderTime = 0.02,
+          upstreamResponseTime = 0.03,
           upstreamResponseLength = 456,
         },
       })
 
-      assert.stub(tcp_mock.connect).was_called_with(tcp_mock, "unix:/tmp/prometheus-nginx.socket")
+      assert.stub(tcp_mock.connect).was_called_with(tcp_mock, "unix:/tmp/nginx/prometheus-nginx.socket")
       assert.stub(tcp_mock.send).was_called_with(tcp_mock, expected_payload)
       assert.stub(tcp_mock.close).was_called_with(tcp_mock)
     end)
